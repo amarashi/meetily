@@ -87,6 +87,7 @@ async fn start_dictation<R: Runtime>(app: &AppHandle<R>) {
     {
         Ok(()) => {
             DICTATION_ACTIVE.store(true, Ordering::SeqCst);
+            show_indicator(app);
             notify(
                 app,
                 "Dictation started",
@@ -127,6 +128,7 @@ async fn stop_dictation<R: Runtime>(app: &AppHandle<R>) {
     // Cleared AFTER stop completes so the tail of speech (chunks still in the
     // transcription queue when the hotkey was pressed) still gets typed.
     DICTATION_ACTIVE.store(false, Ordering::SeqCst);
+    hide_indicator(app);
 
     match stop_result {
         Ok(()) => {
@@ -210,6 +212,78 @@ fn send_unicode_text(text: &str) {
             sent,
             inputs.len()
         );
+    }
+}
+
+const INDICATOR_LABEL: &str = "dictation-indicator";
+const INDICATOR_WIDTH: f64 = 120.0;
+const INDICATOR_HEIGHT: f64 = 40.0;
+
+/// Show a tiny always-on-top "Dictating" pill in the bottom-right corner.
+/// The window is click-through and never takes focus, so it cannot interfere
+/// with where the typed text lands.
+fn show_indicator<R: Runtime>(app: &AppHandle<R>) {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    // Reuse a leftover window if one exists (e.g. after an aborted session).
+    if let Some(win) = app.get_webview_window(INDICATOR_LABEL) {
+        let _ = win.show();
+        return;
+    }
+
+    let win = match WebviewWindowBuilder::new(
+        app,
+        INDICATOR_LABEL,
+        WebviewUrl::App("dictation-indicator.html".into()),
+    )
+    .title("Dictation")
+    .inner_size(INDICATOR_WIDTH, INDICATOR_HEIGHT)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .focused(false)
+    .shadow(false)
+    .build()
+    {
+        Ok(win) => win,
+        Err(e) => {
+            warn!("Failed to create dictation indicator window: {}", e);
+            return;
+        }
+    };
+
+    // Click-through: the pill is purely informational.
+    if let Err(e) = win.set_ignore_cursor_events(true) {
+        warn!("Failed to make dictation indicator click-through: {}", e);
+    }
+
+    // Bottom-right corner of the primary monitor, above a typical taskbar.
+    match win.primary_monitor() {
+        Ok(Some(monitor)) => {
+            let scale = monitor.scale_factor();
+            let size = monitor.size();
+            let pos = monitor.position();
+            let w = (INDICATOR_WIDTH * scale) as i32;
+            let h = (INDICATOR_HEIGHT * scale) as i32;
+            let margin = (16.0 * scale) as i32;
+            let taskbar_clearance = (48.0 * scale) as i32;
+            let x = pos.x + size.width as i32 - w - margin;
+            let y = pos.y + size.height as i32 - h - margin - taskbar_clearance;
+            if let Err(e) = win.set_position(tauri::PhysicalPosition::new(x, y)) {
+                warn!("Failed to position dictation indicator: {}", e);
+            }
+        }
+        _ => warn!("Could not determine primary monitor for dictation indicator"),
+    }
+}
+
+fn hide_indicator<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(win) = app.get_webview_window(INDICATOR_LABEL) {
+        if let Err(e) = win.close() {
+            warn!("Failed to close dictation indicator: {}", e);
+        }
     }
 }
 
