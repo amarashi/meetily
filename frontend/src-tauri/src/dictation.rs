@@ -61,7 +61,7 @@ async fn start_dictation<R: Runtime>(app: &AppHandle<R>) {
 
     let mic_name = match preferred_mic {
         Some(name) if crate::audio::parse_audio_device(&name).is_ok() => Some(name),
-        _ => crate::audio::default_input_device().ok().map(|d| d.name),
+        _ => crate::audio::default_input_device().ok().map(|d| d.to_string()),
     };
 
     let Some(mic_name) = mic_name else {
