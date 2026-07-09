@@ -242,8 +242,18 @@ pub fn get_model_path(app_data_dir: &PathBuf, model_name: &str) -> Result<PathBu
     Ok(model_path)
 }
 
-/// Get the models directory path for built-in AI
+/// Get the models directory path for built-in AI.
+///
+/// Honors `MEETILY_MODELS_DIR` so this load path stays consistent with the download
+/// path in `commands.rs` (which uses `crate::models_base_dir`). Falls back to
+/// `<app_data>/models/summary` when the variable is unset or empty.
 pub fn get_models_directory(app_data_dir: &PathBuf) -> PathBuf {
+    if let Ok(dir) = std::env::var("MEETILY_MODELS_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return PathBuf::from(dir).join("summary");
+        }
+    }
     app_data_dir.join("models").join("summary")
 }
 

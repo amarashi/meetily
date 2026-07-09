@@ -62,6 +62,29 @@ use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::RwLock;
 
+/// Base directory for all downloadable AI models (Whisper, Parakeet, built-in summary GGUF).
+///
+/// Honors the `MEETILY_MODELS_DIR` environment variable so all models can be kept in a
+/// single central location (e.g. `C:\models\meetily`). When the variable is unset or empty,
+/// falls back to the app data directory (`<app_data>/models`), preserving upstream behavior.
+///
+/// Each engine appends its own subfolder as before: Whisper stores directly in this dir,
+/// Parakeet under `parakeet/`, and the summary engine under `summary/`. The summary load
+/// path in `summary_engine::models::get_models_directory` honors the same variable so
+/// downloaded and loaded paths stay consistent.
+pub fn models_base_dir<R: Runtime>(app: &AppHandle<R>) -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("MEETILY_MODELS_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return std::path::PathBuf::from(dir);
+        }
+    }
+    app.path()
+        .app_data_dir()
+        .expect("Failed to get app data dir")
+        .join("models")
+}
+
 static RECORDING_FLAG: AtomicBool = AtomicBool::new(false);
 
 // Global language preference storage (default to "auto-translate" for automatic translation to English)
@@ -405,6 +428,25 @@ pub fn run() {
         }));
     }
 
+    // Global keyboard shortcut to start/stop recording from anywhere (desktop only).
+    // Default: Win+Z. Reuses the exact same toggle logic as the tray menu.
+    #[cfg(desktop)]
+    {
+        use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
+        builder = builder.plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    if event.state() == ShortcutState::Pressed
+                        && shortcut.matches(Modifiers::SUPER, Code::KeyZ)
+                    {
+                        log::info!("Global shortcut Win+Z pressed: toggling recording");
+                        tray::toggle_recording_handler(app);
+                    }
+                })
+                .build(),
+        );
+    }
+
     builder
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -419,6 +461,17 @@ pub fn run() {
         .manage(summary::summary_engine::ModelManagerState(Arc::new(tokio::sync::Mutex::new(None))))
         .setup(|_app| {
             log::info!("Application setup complete");
+
+            // Register the global recording toggle shortcut (Win+Z).
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
+                let shortcut = Shortcut::new(Some(Modifiers::SUPER), Code::KeyZ);
+                match _app.handle().global_shortcut().register(shortcut) {
+                    Ok(_) => log::info!("Registered global shortcut Win+Z for recording toggle"),
+                    Err(e) => log::error!("Failed to register global shortcut Win+Z: {}", e),
+                }
+            }
 
             // Initialize system tray
             if let Err(e) = tray::create_tray(_app.handle()) {

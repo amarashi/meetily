@@ -13,10 +13,9 @@ static MODELS_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Initialize the models directory path using app_data_dir
 /// This should be called during app setup before whisper_init
 pub fn set_models_directory<R: Runtime>(app: &AppHandle<R>) {
-    let app_data_dir = app.path().app_data_dir()
-        .expect("Failed to get app data dir");
-
-    let models_dir = app_data_dir.join("models");
+    // Honors MEETILY_MODELS_DIR so all models can live in one central folder;
+    // falls back to <app_data>/models. See crate::models_base_dir.
+    let models_dir = crate::models_base_dir(app);
 
     // Create directory if it doesn't exist
     if !models_dir.exists() {
