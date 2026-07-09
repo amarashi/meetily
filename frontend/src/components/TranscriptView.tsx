@@ -3,6 +3,7 @@
 import { Transcript } from '@/types';
 import { useEffect, useRef, useState } from 'react';
 import { ConfidenceIndicator } from './ConfidenceIndicator';
+import { getConfidenceTextClass } from './VirtualizedTranscriptView';
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip';
 import { RecordingStatusBar } from './RecordingStatusBar';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -273,6 +274,9 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
         const sizerText = cleanStopWords(isStreaming ? streamingTranscript.fullText : transcript.text)
           || (originalWasEmpty && !isStreaming ? '[Silence]' : '');
 
+        // Color the text by confidence (kept visible instead of dropped)
+        const textColorClass = showConfidence ? getConfidenceTextClass(transcript.confidence) : 'text-gray-800';
+
         return (
           <motion.div
             key={transcript.id ? `${transcript.id}-${index}` : `transcript-${index}`}
@@ -312,7 +316,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
                       <p className="text-base text-gray-800 leading-relaxed" style={{ visibility: 'hidden' }}>
                         {sizerText}
                       </p>
-                      <p className="text-base text-gray-800 leading-relaxed absolute top-0 left-0">
+                      <p className={`text-base ${textColorClass} leading-relaxed absolute top-0 left-0`}>
                         {displayText}
                       </p>
                     </div>
@@ -323,7 +327,7 @@ export const TranscriptView: React.FC<TranscriptViewProps> = ({ transcripts, isR
                     <p className="text-base text-gray-800 leading-relaxed" style={{ visibility: 'hidden' }}>
                       {sizerText}
                     </p>
-                    <p className="text-base text-gray-800 leading-relaxed absolute top-0 left-0">
+                    <p className={`text-base ${textColorClass} leading-relaxed absolute top-0 left-0`}>
                       {displayText}
                     </p>
                   </div>

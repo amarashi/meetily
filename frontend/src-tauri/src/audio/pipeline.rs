@@ -9,7 +9,7 @@ use super::batch_processor::AudioMetricsBatcher;
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 
 use super::devices::AudioDevice;
-use super::recording_state::{AudioChunk, AudioError, RecordingState, DeviceType};
+use super::recording_state::{AudioChunk, AudioError, RecordingState, DeviceType, SpeakerChannel};
 use super::audio_processing::{audio_to_mono, LoudnessNormalizer, NoiseSuppressionProcessor, HighPassFilter};
 use super::vad::{ContinuousVadProcessor};
 
@@ -140,6 +140,109 @@ impl AudioMixerRingBuffer {
         Some((mic_window, sys_window))
     }
 
+}
+
+/// Per-window mic/system energy timeline used for coarse speaker attribution.
+///
+/// Every mixing window extracted from the ring buffer records the mean-square
+/// energy of the mic and system channels BEFORE they are mixed. VAD speech
+/// segments (whose timestamps live on the same mixed-audio timeline) are then
+/// classified by which channel carried the energy: mic-dominant → "You",
+/// system-dominant → "Them", both → "Mixed".
+struct ChannelEnergyTimeline {
+    /// Duration of one mixing window in ms (window_size_samples / sample_rate)
+    window_ms: f64,
+    /// (mic_mean_square, sys_mean_square) per mixed window, oldest first
+    energies: VecDeque<(f32, f32)>,
+    /// Timeline index of energies[0] (windows are dropped from the front)
+    first_window_index: u64,
+}
+
+impl ChannelEnergyTimeline {
+    /// Keep ~40 minutes of history at 600ms windows (16 bytes/window ≈ 64KB)
+    const MAX_WINDOWS: usize = 4096;
+    /// Mean-square level below which a channel is considered silent.
+    /// Mic is normalized to -23 LUFS (speech mean-square ≈ 5e-3), so 1e-6
+    /// (RMS 0.001, ≈ -60 dBFS) is a safe noise floor for both channels.
+    const SPEECH_FLOOR: f32 = 1e-6;
+    /// One channel must carry 3x the energy (~5 dB) of the other to win
+    const DOMINANCE_RATIO: f32 = 3.0;
+
+    fn new(sample_rate: u32, window_size_samples: usize) -> Self {
+        Self {
+            window_ms: window_size_samples as f64 / sample_rate as f64 * 1000.0,
+            energies: VecDeque::with_capacity(Self::MAX_WINDOWS),
+            first_window_index: 0,
+        }
+    }
+
+    fn mean_square(samples: &[f32]) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        samples.iter().map(|&x| x * x).sum::<f32>() / samples.len() as f32
+    }
+
+    /// Record the pre-mix energies of one extracted window
+    fn push_window(&mut self, mic_window: &[f32], sys_window: &[f32]) {
+        self.energies.push_back((
+            Self::mean_square(mic_window),
+            Self::mean_square(sys_window),
+        ));
+        while self.energies.len() > Self::MAX_WINDOWS {
+            self.energies.pop_front();
+            self.first_window_index += 1;
+        }
+    }
+
+    /// Classify a VAD speech segment [start_ms, end_ms] by dominant channel
+    fn classify(&self, start_ms: f64, end_ms: f64) -> Option<SpeakerChannel> {
+        if end_ms <= start_ms || self.energies.is_empty() {
+            return None;
+        }
+
+        let first_idx = (start_ms / self.window_ms).floor() as u64;
+        let last_idx = ((end_ms / self.window_ms).ceil() as u64).max(first_idx + 1);
+
+        let mut mic_sum = 0.0f64;
+        let mut sys_sum = 0.0f64;
+        let mut count = 0u32;
+        for idx in first_idx..last_idx {
+            if idx < self.first_window_index {
+                continue; // Already pruned
+            }
+            let offset = (idx - self.first_window_index) as usize;
+            if let Some(&(mic_ms, sys_ms)) = self.energies.get(offset) {
+                mic_sum += mic_ms as f64;
+                sys_sum += sys_ms as f64;
+                count += 1;
+            }
+        }
+        if count == 0 {
+            return None;
+        }
+
+        let mic_avg = (mic_sum / count as f64) as f32;
+        let sys_avg = (sys_sum / count as f64) as f32;
+
+        let mic_active = mic_avg > Self::SPEECH_FLOOR;
+        let sys_active = sys_avg > Self::SPEECH_FLOOR;
+
+        match (mic_active, sys_active) {
+            (false, false) => None,
+            (true, false) => Some(SpeakerChannel::Mic),
+            (false, true) => Some(SpeakerChannel::System),
+            (true, true) => {
+                if mic_avg > sys_avg * Self::DOMINANCE_RATIO {
+                    Some(SpeakerChannel::Mic)
+                } else if sys_avg > mic_avg * Self::DOMINANCE_RATIO {
+                    Some(SpeakerChannel::System)
+                } else {
+                    Some(SpeakerChannel::Mixed)
+                }
+            }
+        }
+    }
 }
 
 /// Simple audio mixer without aggressive ducking
@@ -613,6 +716,7 @@ impl AudioCapture {
             timestamp,
             chunk_id,
             device_type: self.device_type.clone(),
+            speaker: None,
         };
 
         // NOTE: Raw audio is NOT sent to recording saver to prevent echo
@@ -694,6 +798,8 @@ pub struct AudioPipeline {
     mixer: ProfessionalAudioMixer,
     // Recording sender for pre-mixed audio
     recording_sender_for_mixed: Option<mpsc::UnboundedSender<AudioChunk>>,
+    // SPEAKER ATTRIBUTION: Per-window mic/system energy for You/Them tagging
+    channel_energy: ChannelEnergyTimeline,
 }
 
 impl AudioPipeline {
@@ -740,6 +846,7 @@ impl AudioPipeline {
         // Initialize professional audio mixing components
         let ring_buffer = AudioMixerRingBuffer::new(sample_rate);
         let mixer = ProfessionalAudioMixer::new(sample_rate);
+        let channel_energy = ChannelEnergyTimeline::new(sample_rate, ring_buffer.window_size_samples);
 
         // Note: target_chunk_duration_ms is ignored - VAD controls segmentation now
         let _ = target_chunk_duration_ms;
@@ -760,6 +867,7 @@ impl AudioPipeline {
             ring_buffer,
             mixer,
             recording_sender_for_mixed: None,  // Will be set by manager
+            channel_energy,
         }
     }
 
@@ -822,6 +930,11 @@ impl AudioPipeline {
                     // STEP 2: Mix audio in fixed windows when both streams have sufficient data
                     while self.ring_buffer.can_mix() {
                         if let Some((mic_window, sys_window)) = self.ring_buffer.extract_window() {
+                            // SPEAKER ATTRIBUTION: Record per-channel energy before mixing.
+                            // The mixed stream feeds VAD, so window N here corresponds to
+                            // [N*window_ms, (N+1)*window_ms] on the VAD segment timeline.
+                            self.channel_energy.push_window(&mic_window, &sys_window);
+
                             // Simple mixing without aggressive ducking
                             let mixed_clean = self.mixer.mix_window(&mic_window, &sys_window);
 
@@ -838,8 +951,13 @@ impl AudioPipeline {
                                         let duration_ms = segment.end_timestamp_ms - segment.start_timestamp_ms;
 
                                         if segment.samples.len() >= 800 {  // Minimum 50ms at 16kHz - matches Parakeet capability
-                                            info!("📤 Sending VAD segment: {:.1}ms, {} samples",
-                                                  duration_ms, segment.samples.len());
+                                            let speaker = self.channel_energy.classify(
+                                                segment.start_timestamp_ms,
+                                                segment.end_timestamp_ms,
+                                            );
+
+                                            info!("📤 Sending VAD segment: {:.1}ms, {} samples, speaker={:?}",
+                                                  duration_ms, segment.samples.len(), speaker);
 
                                             let transcription_chunk = AudioChunk {
                                                 data: segment.samples,
@@ -847,6 +965,7 @@ impl AudioPipeline {
                                                 timestamp: segment.start_timestamp_ms / 1000.0,
                                                 chunk_id: self.chunk_id_counter,
                                                 device_type: DeviceType::Microphone,  // Mixed audio
+                                                speaker,
                                             };
 
                                             if let Err(e) = self.transcription_sender.send(transcription_chunk) {
@@ -873,6 +992,7 @@ impl AudioPipeline {
                                     timestamp: chunk.timestamp,
                                     chunk_id: self.chunk_id_counter,
                                     device_type: DeviceType::Microphone,  // Mixed audio
+                                    speaker: None,
                                 };
                                 let _ = sender.send(recording_chunk);
                             }
@@ -908,8 +1028,13 @@ impl AudioPipeline {
 
                     // Send segments >= 50ms (800 samples at 16kHz) - matches main pipeline filter
                     if segment.samples.len() >= 800 {
-                        info!("📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples",
-                              duration_ms, segment.samples.len());
+                        let speaker = self.channel_energy.classify(
+                            segment.start_timestamp_ms,
+                            segment.end_timestamp_ms,
+                        );
+
+                        info!("📤 Sending final VAD segment to Whisper: {:.1}ms duration, {} samples, speaker={:?}",
+                              duration_ms, segment.samples.len(), speaker);
 
                         let transcription_chunk = AudioChunk {
                             data: segment.samples,
@@ -917,6 +1042,7 @@ impl AudioPipeline {
                             timestamp: segment.start_timestamp_ms / 1000.0,
                             chunk_id: self.chunk_id_counter,
                             device_type: DeviceType::Microphone,
+                            speaker,
                         };
 
                         if let Err(e) = self.transcription_sender.send(transcription_chunk) {
@@ -1039,6 +1165,7 @@ impl AudioPipelineManager {
                 timestamp: 0.0,
                 chunk_id: u64::MAX, // Special ID to indicate flush
                 device_type: super::recording_state::DeviceType::Microphone,
+                speaker: None,
             };
 
             if let Err(e) = sender.send(flush_chunk) {
@@ -1059,6 +1186,7 @@ impl AudioPipelineManager {
                         timestamp: 0.0,
                         chunk_id: u64::MAX - (i as u64),
                         device_type: super::recording_state::DeviceType::Microphone,
+                        speaker: None,
                     };
                     let _ = sender.send(additional_flush);
                 }

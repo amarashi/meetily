@@ -540,6 +540,12 @@ impl WhisperEngine {
         params.set_language(language_code);
         params.set_translate(should_translate);
 
+        // Bias decoding toward the user's dictionary terms (names, companies,
+        // medications) so they are recognized with the correct spelling.
+        if let Some(vocabulary_hint) = crate::dictionary::whisper_vocabulary_hint() {
+            params.set_initial_prompt(&vocabulary_hint);
+        }
+
         // CRITICAL: Disable timestamp tokens to prevent whisper.cpp chunking heuristics
         // The "single timestamp ending - skip entire chunk" optimization incorrectly discards
         // complete, valid transcriptions. Disabling timestamps forces whisper to return ALL text.
@@ -656,6 +662,12 @@ impl WhisperEngine {
         };
         params.set_language(language_code);
         params.set_translate(should_translate);
+
+        // Bias decoding toward the user's dictionary terms (names, companies,
+        // medications) so they are recognized with the correct spelling.
+        if let Some(vocabulary_hint) = crate::dictionary::whisper_vocabulary_hint() {
+            params.set_initial_prompt(&vocabulary_hint);
+        }
 
         // CRITICAL: Disable timestamp tokens to prevent whisper.cpp chunking heuristics
         // The "single timestamp ending - skip entire chunk" optimization incorrectly discards

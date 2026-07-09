@@ -4,6 +4,10 @@ export interface Message {
   timestamp: string;
 }
 
+// Coarse speaker attribution from capture channels:
+// 'mic' = local user ("You"), 'system' = remote participants ("Them"), 'mixed' = both
+export type SpeakerChannel = 'mic' | 'system' | 'mixed';
+
 export interface Transcript {
   id: string;
   text: string;
@@ -16,6 +20,7 @@ export interface Transcript {
   audio_start_time?: number; // Seconds from recording start (e.g., 125.3)
   audio_end_time?: number;   // Seconds from recording start (e.g., 128.6)
   duration?: number;          // Segment duration in seconds (e.g., 3.3)
+  speaker?: SpeakerChannel | string; // Dominant capture channel for this segment
 }
 
 export interface TranscriptUpdate {
@@ -30,6 +35,7 @@ export interface TranscriptUpdate {
   audio_start_time: number; // Seconds from recording start
   audio_end_time: number;   // Seconds from recording start
   duration: number;          // Segment duration in seconds
+  speaker?: SpeakerChannel | string; // Dominant capture channel for this segment
 }
 
 export interface Block {
@@ -107,4 +113,5 @@ export interface TranscriptSegmentData {
   endTime?: number; // audio_end_time in seconds
   text: string;
   confidence?: number;
+  speaker?: SpeakerChannel | string; // Dominant capture channel for this segment
 }

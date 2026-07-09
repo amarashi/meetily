@@ -36,6 +36,9 @@ pub struct TranscriptUpdate {
     pub audio_start_time: f64, // Seconds from recording start (e.g., 125.3)
     pub audio_end_time: f64,   // Seconds from recording start (e.g., 128.6)
     pub duration: f64,          // Segment duration in seconds (e.g., 3.3)
+    /// Dominant capture channel: "mic" (You), "system" (Them), "mixed" (both)
+    #[serde(default)]
+    pub speaker: Option<String>,
 }
 
 // NOTE: get_transcript_history and get_recording_meeting_name functions
@@ -142,6 +145,7 @@ pub fn start_transcription_task<R: Runtime>(
 
                             let chunk_timestamp = chunk.timestamp;
                             let chunk_duration = chunk.data.len() as f64 / chunk.sample_rate as f64;
+                            let chunk_speaker = chunk.speaker.map(|s| s.as_str().to_string());
 
                             // Transcribe with provider-agnostic approach
                             match transcribe_chunk_with_provider(
@@ -152,6 +156,10 @@ pub fn start_transcription_task<R: Runtime>(
                             .await
                             {
                                 Ok((transcript, confidence_opt, is_partial)) => {
+                                    // Apply user-dictionary corrections (misheard -> correct)
+                                    // before the text reaches the UI, the DB, or dictation.
+                                    let transcript = crate::dictionary::apply_corrections(&transcript);
+
                                     // Provider-aware confidence threshold
                                     let confidence_threshold = match &engine_clone {
                                         TranscriptionEngine::Whisper(_) | TranscriptionEngine::Provider(_) => 0.3,
@@ -166,10 +174,18 @@ pub fn start_transcription_task<R: Runtime>(
                                     info!("🔍 Worker {} transcription result: text='{}', confidence={}, partial={}, threshold={:.2}",
                                           worker_id, transcript, confidence_str, is_partial, confidence_threshold);
 
-                                    // Check confidence threshold (or accept if no confidence provided)
+                                    // Confidence threshold no longer drops segments from the
+                                    // transcript: every non-empty segment is emitted with its
+                                    // confidence so the UI can color low-confidence text instead
+                                    // of hiding it. The threshold still gates dictation typing.
                                     let meets_threshold = confidence_opt.map_or(true, |c| c >= confidence_threshold);
 
-                                    if !transcript.trim().is_empty() && meets_threshold {
+                                    if !transcript.trim().is_empty() {
+                                        if !meets_threshold {
+                                            if let Some(c) = confidence_opt {
+                                                info!("Worker {} low-confidence transcription (confidence: {:.2}), keeping for display", worker_id, c);
+                                            }
+                                        }
                                         // PERFORMANCE: Only log transcription results, not every processing step
                                         info!("✅ Worker {} transcribed: {} (confidence: {}, partial: {})",
                                               worker_id, transcript, confidence_str, is_partial);
@@ -217,6 +233,7 @@ pub fn start_transcription_task<R: Runtime>(
                                             audio_start_time,
                                             audio_end_time,
                                             duration: chunk_duration,
+                                            speaker: chunk_speaker,
                                         };
 
                                         if let Err(e) = app_clone.emit("transcript-update", &update)
@@ -227,18 +244,13 @@ pub fn start_transcription_task<R: Runtime>(
                                             );
                                         }
 
-                                        // Dictation mode: also type the segment into the
-                                        // currently focused window (system-wide voice typing)
-                                        if crate::dictation::is_dictation_active() {
-                                            crate::dictation::type_transcribed_text(&update.text);
+                                        // Dictation mode: queue the segment for cleanup + typing
+                                        // into the focused window. Low-confidence segments are
+                                        // shown in the app but never typed into other apps.
+                                        if meets_threshold && crate::dictation::is_dictation_active() {
+                                            crate::dictation::enqueue_transcribed_text(&update.text);
                                         }
                                         // PERFORMANCE: Removed verbose logging of every emission
-                                    } else if !transcript.trim().is_empty() && should_log_this_chunk
-                                    {
-                                        // PERFORMANCE: Only log low-confidence results occasionally
-                                        if let Some(c) = confidence_opt {
-                                            info!("Worker {} low-confidence transcription (confidence: {:.2}), skipping", worker_id, c);
-                                        }
                                     }
                                 }
                                 Err(e) => {

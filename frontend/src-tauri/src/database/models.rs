@@ -35,6 +35,9 @@ pub struct Transcript {
     pub audio_start_time: Option<f64>,
     pub audio_end_time: Option<f64>,
     pub duration: Option<f64>,
+    /// Dominant capture channel: "mic" (You), "system" (Them), "mixed" (both)
+    #[serde(default)]
+    pub speaker: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

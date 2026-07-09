@@ -6,6 +6,7 @@ import { invoke as invokeTauri } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { isOllamaNotInstalledError } from '@/lib/utils';
+import { speakerPrefix } from '@/lib/speaker';
 import { BuiltInModelInfo } from '@/lib/builtin-ai';
 import {
   detectAndCacheSummaryLanguage,
@@ -446,7 +447,7 @@ export function useSummaryGeneration({
 
     return {
       transcriptText: allTranscripts
-        .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${t.text}`)
+        .map(t => `${formatTime(t.audio_start_time, t.timestamp)} ${speakerPrefix(t.speaker)}${t.text}`)
         .join('\n'),
       transcriptTexts: allTranscripts.map(t => t.text),
     };

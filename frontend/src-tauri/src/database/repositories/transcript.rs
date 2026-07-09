@@ -47,8 +47,8 @@ impl TranscriptsRepository {
         for segment in transcripts {
             let transcript_id = format!("transcript-{}", Uuid::new_v4());
             let result = sqlx::query(
-                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)"
+                "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
             )
             .bind(&transcript_id)
             .bind(&meeting_id)
@@ -57,6 +57,7 @@ impl TranscriptsRepository {
             .bind(segment.audio_start_time)
             .bind(segment.audio_end_time)
             .bind(segment.duration)
+            .bind(&segment.speaker)
             .execute(&mut *transaction)
             .await;
 
@@ -80,6 +81,28 @@ impl TranscriptsRepository {
         transaction.commit().await?;
 
         Ok(meeting_id)
+    }
+
+    /// Updates the text of a single transcript segment (user correction from
+    /// the meeting details view).
+    pub async fn update_transcript_text(
+        pool: &SqlitePool,
+        transcript_id: &str,
+        text: &str,
+    ) -> Result<(), SqlxError> {
+        let result = sqlx::query("UPDATE transcripts SET transcript = ? WHERE id = ?")
+            .bind(text)
+            .bind(transcript_id)
+            .execute(pool)
+            .await?;
+
+        if result.rows_affected() == 0 {
+            error!("No transcript found with id: {}", transcript_id);
+            return Err(SqlxError::RowNotFound);
+        }
+
+        info!("Updated transcript segment {}", transcript_id);
+        Ok(())
     }
 
     /// Searches for a query string within the transcripts.

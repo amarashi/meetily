@@ -2,11 +2,23 @@
 
 import { useEffect, useState, useRef } from "react"
 import { Switch } from "./ui/switch"
-import { FolderOpen } from "lucide-react"
+import { FolderOpen, Plus, Trash2 } from "lucide-react"
 import { invoke } from "@tauri-apps/api/core"
 import Analytics from "@/lib/analytics"
 import AnalyticsConsentSwitch from "./AnalyticsConsentSwitch"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
+
+interface DictationSettings {
+  cleanup_enabled: boolean;
+  cleanup_model: string;
+  ollama_endpoint: string;
+}
+
+interface DictionaryEntry {
+  id: string;
+  misheard: string | null;
+  correct: string;
+}
 
 export function PreferenceSettings() {
   const {
@@ -18,6 +30,10 @@ export function PreferenceSettings() {
   } = useConfig();
 
   const [notificationsEnabled, setNotificationsEnabled] = useState<boolean | null>(null);
+  const [dictationSettings, setDictationSettings] = useState<DictationSettings | null>(null);
+  const [dictionaryEntries, setDictionaryEntries] = useState<DictionaryEntry[]>([]);
+  const [newMisheard, setNewMisheard] = useState('');
+  const [newCorrect, setNewCorrect] = useState('');
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [previousNotificationsEnabled, setPreviousNotificationsEnabled] = useState<boolean | null>(null);
   const hasTrackedViewRef = useRef(false);
@@ -28,6 +44,54 @@ export function PreferenceSettings() {
     // Reset tracking ref on mount (every tab visit)
     hasTrackedViewRef.current = false;
   }, [loadPreferences]);
+
+  // Load dictation settings on mount
+  useEffect(() => {
+    invoke<DictationSettings>('get_dictation_settings')
+      .then(setDictationSettings)
+      .catch((error) => console.error('Failed to load dictation settings:', error));
+  }, []);
+
+  const updateDictationSettings = async (updated: DictationSettings) => {
+    setDictationSettings(updated);
+    try {
+      await invoke('set_dictation_settings', { settings: updated });
+    } catch (error) {
+      console.error('Failed to save dictation settings:', error);
+    }
+  };
+
+  // Load dictionary entries on mount
+  useEffect(() => {
+    invoke<DictionaryEntry[]>('get_dictionary_entries')
+      .then(setDictionaryEntries)
+      .catch((error) => console.error('Failed to load dictionary:', error));
+  }, []);
+
+  const handleAddDictionaryEntry = async () => {
+    const correct = newCorrect.trim();
+    if (!correct) return;
+    const misheard = newMisheard.trim() || null;
+    try {
+      const entry = await invoke<DictionaryEntry>('add_dictionary_entry', { misheard, correct });
+      setDictionaryEntries((prev) =>
+        prev.some((e) => e.id === entry.id) ? prev : [...prev, entry]
+      );
+      setNewMisheard('');
+      setNewCorrect('');
+    } catch (error) {
+      console.error('Failed to add dictionary entry:', error);
+    }
+  };
+
+  const handleDeleteDictionaryEntry = async (id: string) => {
+    try {
+      await invoke('delete_dictionary_entry', { id });
+      setDictionaryEntries((prev) => prev.filter((e) => e.id !== id));
+    } catch (error) {
+      console.error('Failed to delete dictionary entry:', error);
+    }
+  };
 
   // Track preferences viewed analytics on every tab visit (once per mount)
   useEffect(() => {
@@ -157,6 +221,123 @@ export function PreferenceSettings() {
           </div>
           <Switch checked={notificationsEnabledValue} onCheckedChange={setNotificationsEnabled} />
         </div>
+      </div>
+
+      {/* Dictation Section */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Dictation (Win+Shift+Z)</h3>
+        <p className="text-sm text-gray-600 mb-4">
+          System-wide voice typing into the focused window
+        </p>
+
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium text-gray-700">Clean up text with AI before typing</p>
+              <p className="text-xs text-gray-500">
+                Removes filler words, stutters, and false starts using a local Ollama model.
+                Falls back to raw text if Ollama is unavailable.
+              </p>
+            </div>
+            <Switch
+              checked={dictationSettings?.cleanup_enabled ?? true}
+              onCheckedChange={(checked) => {
+                if (dictationSettings) {
+                  updateDictationSettings({ ...dictationSettings, cleanup_enabled: checked });
+                }
+              }}
+              disabled={!dictationSettings}
+            />
+          </div>
+
+          {dictationSettings?.cleanup_enabled && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                Cleanup model
+              </label>
+              <input
+                type="text"
+                value={dictationSettings.cleanup_model}
+                onChange={(e) =>
+                  setDictationSettings({ ...dictationSettings, cleanup_model: e.target.value })
+                }
+                onBlur={() => updateDictationSettings(dictationSettings)}
+                placeholder="gemma3:4b"
+                className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Ollama model name. The default <span className="font-mono">gemma3:4b</span> is fast and
+                handles both English and Persian well (install with{' '}
+                <span className="font-mono">ollama pull gemma3:4b</span>).
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Dictionary Section */}
+      <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
+        <h3 className="text-lg font-semibold text-gray-900 mb-2">Dictionary</h3>
+        <p className="text-sm text-gray-600 mb-4">
+          Names, companies, medications, or words you pronounce differently. Used to improve
+          transcription in meetings and dictation. Fixing a transcript in a meeting adds entries
+          here automatically.
+        </p>
+
+        {/* Add entry form */}
+        <div className="flex gap-2 mb-4">
+          <input
+            type="text"
+            dir="auto"
+            value={newMisheard}
+            onChange={(e) => setNewMisheard(e.target.value)}
+            placeholder="Misheard as (optional)"
+            className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+          />
+          <input
+            type="text"
+            dir="auto"
+            value={newCorrect}
+            onChange={(e) => setNewCorrect(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleAddDictionaryEntry()}
+            placeholder="Correct word or phrase"
+            className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+          />
+          <button
+            onClick={handleAddDictionaryEntry}
+            disabled={!newCorrect.trim()}
+            className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Plus className="w-4 h-4" />
+            Add
+          </button>
+        </div>
+
+        {/* Entries list */}
+        {dictionaryEntries.length === 0 ? (
+          <p className="text-sm text-gray-400">
+            No entries yet. Add a word above, or fix a transcript in any meeting.
+          </p>
+        ) : (
+          <div className="max-h-64 overflow-y-auto divide-y divide-gray-100 border border-gray-100 rounded-md">
+            {dictionaryEntries.map((entry) => (
+              <div key={entry.id} className="flex items-center gap-2 px-3 py-2 text-sm">
+                <span dir="auto" className="flex-1 text-gray-500">
+                  {entry.misheard ?? <em className="text-gray-400">any similar sound</em>}
+                </span>
+                <span className="text-gray-400">→</span>
+                <span dir="auto" className="flex-1 font-medium text-gray-800">{entry.correct}</span>
+                <button
+                  onClick={() => handleDeleteDictionaryEntry(entry.id)}
+                  title="Remove entry"
+                  className="p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Data Storage Locations Section */}

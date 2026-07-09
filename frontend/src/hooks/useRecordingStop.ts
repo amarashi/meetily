@@ -296,6 +296,13 @@ export function useRecordingStop(
           // Mark meeting as saved in IndexedDB (for recovery system)
           await markMeetingAsSaved();
 
+          // Kick off speaker diarization in the background (fire-and-forget).
+          // Refines "Them" segments into "Them 1/2/..." when several remote
+          // speakers are detected; meeting details refetches on completion.
+          import('@tauri-apps/api/core').then(({ invoke }) =>
+            invoke('diarize_meeting', { meetingId })
+          ).catch(err => console.warn('Speaker diarization skipped:', err));
+
           // Clean up session storage
           sessionStorage.removeItem('last_recording_folder_path');
           sessionStorage.removeItem('last_recording_meeting_name');

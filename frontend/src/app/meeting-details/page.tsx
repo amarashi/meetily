@@ -6,6 +6,7 @@ import PageContent from "./page-content";
 import { useRouter, useSearchParams } from "next/navigation";
 import Analytics from "@/lib/analytics";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { LoaderIcon } from "lucide-react";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
@@ -47,6 +48,23 @@ function MeetingDetailsContent() {
     refetch,
     error: transcriptError,
   } = usePaginatedTranscripts({ meetingId: meetingId || '' });
+
+  // Background speaker diarization runs after a recording is saved; when it
+  // finishes for this meeting, reload transcripts to show Them 1/2/... labels
+  useEffect(() => {
+    if (!meetingId) return;
+    let unlisten: (() => void) | undefined;
+    listen<{ meeting_id: string; segments_updated: number }>(
+      'diarization-complete',
+      (event) => {
+        if (event.payload.meeting_id === meetingId && event.payload.segments_updated > 0) {
+          console.log('🗣️ Speaker diarization complete, refreshing transcripts');
+          refetch();
+        }
+      }
+    ).then((fn) => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
+  }, [meetingId, refetch]);
 
   // Check if gemma3:1b model is available in Ollama
   const checkForGemmaModel = useCallback(async (): Promise<boolean> => {

@@ -1,5 +1,7 @@
 #[path = "build/ffmpeg.rs"]
 mod ffmpeg;
+#[path = "build/sherpa.rs"]
+mod sherpa;
 
 fn main() {
     // GPU Acceleration Detection and Build Guidance
@@ -17,6 +19,10 @@ fn main() {
 
     // Download and bundle FFmpeg binary at build-time
     ffmpeg::ensure_ffmpeg_binary();
+
+    // Stage sherpa-onnx DLLs (speaker diarization) for Windows bundling.
+    // Must run before tauri_build::build(), which validates resource paths.
+    sherpa::ensure_sherpa_dlls();
 
     tauri_build::build()
 }

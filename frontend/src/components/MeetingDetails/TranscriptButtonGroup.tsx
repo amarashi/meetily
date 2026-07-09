@@ -3,7 +3,9 @@
 import { useState, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
 import { RetranscribeDialog } from './RetranscribeDialog';
 import { useConfig } from '@/contexts/ConfigContext';
@@ -29,6 +31,7 @@ export function TranscriptButtonGroup({
 }: TranscriptButtonGroupProps) {
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
+  const [isDetectingSpeakers, setIsDetectingSpeakers] = useState(false);
 
   const handleRetranscribeComplete = useCallback(async () => {
     // Refetch transcripts to show the updated data
@@ -36,6 +39,35 @@ export function TranscriptButtonGroup({
       await onRefetchTranscripts();
     }
   }, [onRefetchTranscripts]);
+
+  // Run local speaker diarization over the recording and tag segments
+  // with Them 1/2/... (or Speaker 1/2/... for imported meetings)
+  const handleDetectSpeakers = useCallback(async () => {
+    if (!meetingId || isDetectingSpeakers) return;
+    setIsDetectingSpeakers(true);
+    try {
+      const result = await invoke<{ num_speakers: number; segments_updated: number }>(
+        'diarize_meeting',
+        { meetingId }
+      );
+      if (result.segments_updated > 0) {
+        toast.success(`Detected ${result.num_speakers} speakers`, {
+          description: `${result.segments_updated} transcript segments tagged.`,
+        });
+        if (onRefetchTranscripts) {
+          await onRefetchTranscripts();
+        }
+      } else {
+        toast.info('No additional speakers detected', {
+          description: 'The existing speaker labels are already as detailed as possible.',
+        });
+      }
+    } catch (error) {
+      toast.error('Speaker detection failed', { description: String(error) });
+    } finally {
+      setIsDetectingSpeakers(false);
+    }
+  }, [meetingId, isDetectingSpeakers, onRefetchTranscripts]);
 
   return (
     <div className="flex items-center justify-center w-full gap-2">
@@ -81,6 +113,23 @@ export function TranscriptButtonGroup({
           >
             <RefreshCw className="xl:mr-2" size={18} />
             <span className="hidden lg:inline">Enhance</span>
+          </Button>
+        )}
+
+        {meetingId && meetingFolderPath && transcriptCount > 0 && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="xl:px-4"
+            onClick={() => {
+              Analytics.trackButtonClick('detect_speakers', 'meeting_details');
+              handleDetectSpeakers();
+            }}
+            disabled={isDetectingSpeakers}
+            title="Detect individual speakers in the recording (local AI)"
+          >
+            <Users className={`xl:mr-2 ${isDetectingSpeakers ? 'animate-pulse' : ''}`} size={18} />
+            <span className="hidden lg:inline">{isDetectingSpeakers ? 'Detecting...' : 'Speakers'}</span>
           </Button>
         )}
       </ButtonGroup>

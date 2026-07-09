@@ -8,6 +8,7 @@ import { ConfidenceIndicator } from "./ConfidenceIndicator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 import { RecordingStatusBar } from "./RecordingStatusBar";
 import { motion, AnimatePresence } from "framer-motion";
+import { Pencil, Check, X } from "lucide-react";
 import { TranscriptSegmentData } from "@/types";
 
 export interface VirtualizedTranscriptViewProps {
@@ -34,6 +35,10 @@ export interface VirtualizedTranscriptViewProps {
     totalCount?: number;
     loadedCount?: number;
     onLoadMore?: () => void;
+
+    /** Enable inline editing of segment text (meeting details page).
+     *  Called with the segment id and the corrected text on save. */
+    onSegmentEdit?: (segmentId: string, newText: string) => void | Promise<void>;
 }
 
 // Threshold for enabling virtualization (below this, use simple rendering)
@@ -63,26 +68,88 @@ function cleanStopWords(text: string): string {
     return cleanedText.replace(/\s+/g, ' ').trim();
 }
 
+// Text color by transcription confidence: normal for high, orange for medium,
+// red for low. Low-confidence segments are kept visible instead of dropped.
+export function getConfidenceTextClass(confidence?: number): string {
+    if (confidence === undefined || confidence >= 0.7) return 'text-gray-800';
+    if (confidence >= 0.4) return 'text-orange-500';
+    return 'text-red-600';
+}
+
+// Distinct colors for diarized speakers (Them 1, Them 2, ...), cycled by number
+const SPEAKER_COLORS = [
+    'bg-emerald-100 text-emerald-700',
+    'bg-purple-100 text-purple-700',
+    'bg-amber-100 text-amber-700',
+    'bg-rose-100 text-rose-700',
+    'bg-cyan-100 text-cyan-700',
+];
+
+// Speaker chip label + style per capture channel / diarized speaker.
+// 'mic' = local user, 'system' = remote participants, 'mixed' = both talking.
+// After diarization: 'system:N' = N-th remote speaker, 'speaker:N' = N-th
+// speaker in an imported meeting (no channel info).
+function getSpeakerBadge(speaker?: string): { label: string; className: string } | null {
+    if (!speaker) return null;
+    switch (speaker) {
+        case 'mic':
+            return { label: 'You', className: 'bg-blue-100 text-blue-700' };
+        case 'system':
+            return { label: 'Them', className: 'bg-emerald-100 text-emerald-700' };
+        case 'mixed':
+            return { label: 'Both', className: 'bg-gray-100 text-gray-600' };
+    }
+    const match = speaker.match(/^(system|speaker):(\d+)$/);
+    if (match) {
+        const n = parseInt(match[2], 10);
+        const label = match[1] === 'system' ? `Them ${n}` : `Speaker ${n}`;
+        return { label, className: SPEAKER_COLORS[(n - 1) % SPEAKER_COLORS.length] };
+    }
+    return null;
+}
+
 // Memoized transcript segment component
 const TranscriptSegment = memo(function TranscriptSegment({
     id,
     timestamp,
     text,
     confidence,
+    speaker,
     isStreaming,
     showConfidence,
+    onEdit,
 }: {
     id: string;
     timestamp: number;
     text: string;
     confidence?: number;
+    speaker?: string;
     isStreaming: boolean;
     showConfidence: boolean;
+    onEdit?: (segmentId: string, newText: string) => void | Promise<void>;
 }) {
+    const [isEditing, setIsEditing] = useState(false);
+    const [draft, setDraft] = useState(text);
+
     const displayText = cleanStopWords(text) || (text.trim() === '' ? '[Silence]' : text);
+    const textColorClass = showConfidence ? getConfidenceTextClass(confidence) : 'text-gray-800';
+    const speakerBadge = getSpeakerBadge(speaker);
+
+    const startEditing = () => {
+        setDraft(text);
+        setIsEditing(true);
+    };
+
+    const saveEdit = () => {
+        setIsEditing(false);
+        const newText = draft.trim();
+        if (onEdit && newText && newText !== text.trim()) {
+            onEdit(id, newText);
+        }
+    };
 
     return (
-        <div id={`segment-${id}`} className="mb-3">
+        <div id={`segment-${id}`} className="mb-3 group">
             <div className="flex items-start gap-2">
                 <Tooltip>
                     <TooltipTrigger>
@@ -96,15 +163,67 @@ const TranscriptSegment = memo(function TranscriptSegment({
                         )}
                     </TooltipContent>
                 </Tooltip>
+                {speakerBadge && (
+                    <span className={`text-[10px] font-medium px-1.5 py-0.5 mt-1 rounded-full flex-shrink-0 ${speakerBadge.className}`}>
+                        {speakerBadge.label}
+                    </span>
+                )}
                 <div className="flex-1">
-                    {isStreaming ? (
+                    {/* dir="auto" + bidi plaintext: RTL languages (Persian, Arabic, Hebrew)
+                        render right-to-left with embedded LTR words (English terms)
+                        displayed correctly instead of scrambling the word order. */}
+                    {isEditing ? (
+                        <div>
+                            <textarea
+                                dir="auto"
+                                value={draft}
+                                onChange={(e) => setDraft(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        saveEdit();
+                                    } else if (e.key === 'Escape') {
+                                        setIsEditing(false);
+                                    }
+                                }}
+                                autoFocus
+                                className="w-full px-2 py-1 text-base border border-blue-300 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 resize-y"
+                                rows={Math.max(1, Math.ceil(draft.length / 80))}
+                            />
+                            <div className="flex gap-1 mt-1">
+                                <button
+                                    onClick={saveEdit}
+                                    title="Save (fixes are learned into your dictionary)"
+                                    className="p-1 text-green-600 hover:bg-green-50 rounded"
+                                >
+                                    <Check className="w-4 h-4" />
+                                </button>
+                                <button
+                                    onClick={() => setIsEditing(false)}
+                                    title="Cancel"
+                                    className="p-1 text-gray-500 hover:bg-gray-100 rounded"
+                                >
+                                    <X className="w-4 h-4" />
+                                </button>
+                            </div>
+                        </div>
+                    ) : isStreaming ? (
                         <div className="bg-gray-100 border border-gray-200 rounded-lg px-3 py-2">
-                            <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
+                            <p dir="auto" style={{ unicodeBidi: 'plaintext' }} className={`text-base ${textColorClass} leading-relaxed`}>{displayText}</p>
                         </div>
                     ) : (
-                        <p className="text-base text-gray-800 leading-relaxed">{displayText}</p>
+                        <p dir="auto" style={{ unicodeBidi: 'plaintext' }} className={`text-base ${textColorClass} leading-relaxed`}>{displayText}</p>
                     )}
                 </div>
+                {onEdit && !isEditing && !isStreaming && (
+                    <button
+                        onClick={startEditing}
+                        title="Fix transcription (corrections are added to your dictionary)"
+                        className="p-1 mt-0.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                    >
+                        <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                )}
             </div>
         </div>
     );
@@ -124,6 +243,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     totalCount = 0,
     loadedCount = 0,
     onLoadMore,
+    onSegmentEdit,
 }) => {
     // Create scroll ref first - shared between virtualizer and auto-scroll hook
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -294,8 +414,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onEdit={onSegmentEdit}
                                     />
                                 </div>
                             );
@@ -350,8 +472,10 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
                                         timestamp={segment.timestamp}
                                         text={getDisplayText(segment)}
                                         confidence={segment.confidence}
+                                        speaker={segment.speaker}
                                         isStreaming={isStreaming}
                                         showConfidence={showConfidence}
+                                        onEdit={onSegmentEdit}
                                     />
                                 </motion.div>
                             );

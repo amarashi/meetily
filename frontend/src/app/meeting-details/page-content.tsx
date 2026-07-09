@@ -17,6 +17,7 @@ import { useTemplates } from '@/hooks/meeting-details/useTemplates';
 import { useCopyOperations } from '@/hooks/meeting-details/useCopyOperations';
 import { useMeetingOperations } from '@/hooks/meeting-details/useMeetingOperations';
 import { useConfig } from '@/contexts/ConfigContext';
+import { extractCorrections } from '@/lib/transcriptDiff';
 
 export default function PageContent({
   meeting,
@@ -134,6 +135,45 @@ export default function PageContent({
     meeting,
   });
 
+  // Save an inline transcript fix, then learn the changed words into the user
+  // dictionary so future transcriptions (meetings and dictation) get them right.
+  const handleSegmentEdit = async (segmentId: string, newText: string) => {
+    const original =
+      segments?.find((s: any) => s.id === segmentId)?.text ??
+      meetingData.transcripts.find((t: any) => t.id === segmentId)?.text;
+
+    try {
+      await invoke('api_update_transcript_text', { transcriptId: segmentId, text: newText });
+    } catch (error) {
+      console.error('Failed to update transcript segment:', error);
+      toast.error('Failed to save transcript fix');
+      return;
+    }
+
+    let learned = 0;
+    if (original) {
+      const pairs = extractCorrections(original, newText);
+      for (const pair of pairs) {
+        try {
+          await invoke('add_dictionary_entry', { misheard: pair.misheard, correct: pair.correct });
+          learned++;
+        } catch (error) {
+          console.error('Failed to add dictionary entry:', error);
+        }
+      }
+      if (learned > 0) {
+        toast.success(`Transcript fixed — learned ${learned} correction${learned > 1 ? 's' : ''}`, {
+          description: pairs.map(p => `"${p.misheard}" → "${p.correct}"`).join('  ·  '),
+        });
+      }
+    }
+    if (learned === 0) {
+      toast.success('Transcript updated');
+    }
+
+    await onRefetchTranscripts?.();
+  };
+
   // Track page view
   useEffect(() => {
     Analytics.trackPageView('meeting_details');
@@ -191,6 +231,7 @@ export default function PageContent({
           meetingId={meeting.id}
           meetingFolderPath={meeting.folder_path}
           onRefetchTranscripts={onRefetchTranscripts}
+          onSegmentEdit={handleSegmentEdit}
         />
         <SummaryPanel
           meeting={meeting}

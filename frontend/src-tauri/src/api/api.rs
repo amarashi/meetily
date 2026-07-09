@@ -137,6 +137,9 @@ pub struct MeetingTranscript {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Dominant capture channel: "mic" (You), "system" (Them), "mixed" (both)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 /// Meeting metadata without transcripts (for pagination)
@@ -188,6 +191,9 @@ pub struct TranscriptSegment {
     pub audio_end_time: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Dominant capture channel: "mic" (You), "system" (Them), "mixed" (both)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -878,6 +884,7 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
                     audio_start_time: t.audio_start_time,
                     audio_end_time: t.audio_end_time,
                     duration: t.duration,
+                    speaker: t.speaker,
                 })
                 .collect::<Vec<_>>();
 
@@ -894,6 +901,25 @@ pub async fn api_get_meeting_transcripts<R: Runtime>(
             Err(format!("Failed to retrieve transcripts: {}", e))
         }
     }
+}
+
+/// Update the text of a single transcript segment (user correction in the
+/// meeting details view).
+#[tauri::command]
+pub async fn api_update_transcript_text<R: Runtime>(
+    _app: AppHandle<R>,
+    state: tauri::State<'_, AppState>,
+    transcript_id: String,
+    text: String,
+) -> Result<(), String> {
+    log_info!(
+        "api_update_transcript_text called for transcript_id: {}",
+        transcript_id
+    );
+    let pool = state.db_manager.pool();
+    TranscriptsRepository::update_transcript_text(pool, &transcript_id, &text)
+        .await
+        .map_err(|e| format!("Failed to update transcript: {}", e))
 }
 
 #[tauri::command]

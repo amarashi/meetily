@@ -59,6 +59,7 @@ which = "6.0.1"
 zip = "2.2"           # ZIP extraction (Windows, macOS)
 tar = "0.4"           # TAR extraction (Linux)
 xz2 = "0.1"           # XZ decompression (Linux)
+bzip2 = "0.4"         # BZ2 decompression (sherpa-onnx prebuilt archive)
 
 
 [dependencies]
@@ -105,6 +106,15 @@ silero_rs = { git = "https://github.com/emotechlab/silero-rs", rev = "26a6460", 
 # Parakeet (ONNX-based fast transcription) dependencies
 ort = { version = "2.0.0-rc.10" }  # ONNX Runtime for Parakeet models
 thiserror = "2.0.16"                # Error handling for Parakeet
+
+# Speaker diarization (pyannote segmentation + speaker embeddings, fully local)
+# Build script downloads prebuilt sherpa-onnx libs; no cmake needed.
+# "shared" (DLL) linking is required on Windows: the static archives are built
+# with the static CRT (/MT) and collide with this app's dynamic CRT (/MD).
+# The sys build script auto-copies the DLLs into target/{debug,release}; the
+# version is pinned because build/sherpa.rs stages the matching DLLs for
+# bundling (keep SHERPA_ONNX_VERSION there in sync).
+sherpa-onnx = { version = "=1.13.4", default-features = false, features = ["shared"] }
 
 # Async
 tokio = { version = "1.32.0", features = ["full", "tracing"] }

@@ -42,6 +42,7 @@ pub mod config;
 pub mod console_utils;
 pub mod database;
 pub mod dictation;
+pub mod dictionary;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -466,6 +467,10 @@ pub fn run() {
         .setup(|_app| {
             log::info!("Application setup complete");
 
+            // Load the user dictionary into its in-memory cache so transcript
+            // corrections apply from the first segment.
+            dictionary::init(_app.handle());
+
             // Register the global recording toggle shortcut (Win+Z).
             #[cfg(desktop)]
             {
@@ -712,6 +717,7 @@ pub fn run() {
             api::api_get_meeting,
             api::api_get_meeting_metadata,
             api::api_get_meeting_transcripts,
+            api::api_update_transcript_text,
             api::api_save_meeting_title,
             api::api_save_transcript,
             api::open_meeting_folder,
@@ -746,6 +752,12 @@ pub fn run() {
             summary::summary_engine::commands::builtin_ai_get_available_summary_model,
             summary::summary_engine::commands::builtin_ai_get_recommended_model,
             openrouter::get_openrouter_models,
+            dictation::get_dictation_settings,
+            dictation::set_dictation_settings,
+            dictionary::get_dictionary_entries,
+            dictionary::add_dictionary_entry,
+            dictionary::update_dictionary_entry,
+            dictionary::delete_dictionary_entry,
             audio::recording_preferences::get_recording_preferences,
             audio::recording_preferences::set_recording_preferences,
             audio::recording_preferences::get_default_recordings_folder_path,
@@ -807,6 +819,8 @@ pub fn run() {
             audio::retranscription::start_retranscription_command,
             audio::retranscription::cancel_retranscription_command,
             audio::retranscription::is_retranscription_in_progress_command,
+            // Speaker diarization command
+            audio::diarization::diarize_meeting,
             // Import audio commands
             audio::import::select_and_validate_audio_command,
             audio::import::validate_audio_file_command,

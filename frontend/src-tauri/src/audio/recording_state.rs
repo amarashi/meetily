@@ -14,6 +14,27 @@ pub enum DeviceType {
     System,
 }
 
+/// Which capture channel dominated a speech segment (coarse speaker attribution).
+/// `Mic` = the local user ("You"), `System` = remote participants ("Them"),
+/// `Mixed` = both channels active during the segment.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpeakerChannel {
+    Mic,
+    System,
+    Mixed,
+}
+
+impl SpeakerChannel {
+    /// Stable string form persisted in the DB `transcripts.speaker` column
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SpeakerChannel::Mic => "mic",
+            SpeakerChannel::System => "system",
+            SpeakerChannel::Mixed => "mixed",
+        }
+    }
+}
+
 /// Audio chunk with metadata for processing
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
@@ -22,6 +43,8 @@ pub struct AudioChunk {
     pub timestamp: f64,
     pub chunk_id: u64,
     pub device_type: DeviceType,
+    /// Dominant capture channel for this chunk (set for VAD speech segments)
+    pub speaker: Option<SpeakerChannel>,
 }
 
 /// Processed audio chunk (post-VAD) for recording
