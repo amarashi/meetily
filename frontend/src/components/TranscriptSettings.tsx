@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Input } from './ui/input';
 import { Button } from './ui/button';
@@ -27,6 +28,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
     const [isApiKeyLocked, setIsApiKeyLocked] = useState<boolean>(true);
     const [isLockButtonVibrating, setIsLockButtonVibrating] = useState<boolean>(false);
     const [uiProvider, setUiProvider] = useState<TranscriptModelProps['provider']>(transcriptModelConfig.provider);
+    const [isSaving, setIsSaving] = useState<boolean>(false);
 
     // Sync uiProvider when backend config changes (e.g., after model selection or initial load)
     useEffect(() => {
@@ -50,20 +52,50 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
             setApiKey(null);
         }
     };
-    const modelOptions = {
+    const modelOptions: Record<TranscriptModelProps['provider'], string[]> = {
         localWhisper: [], // Model selection handled by ModelManager component
         parakeet: [], // Model selection handled by ParakeetModelManager component
         deepgram: ['nova-2-phonecall'],
-        elevenLabs: ['eleven_multilingual_v2'],
+        elevenLabs: ['scribe_v2', 'scribe_v1'],
         groq: ['llama-3.3-70b-versatile'],
         openai: ['gpt-4o'],
     };
-    const requiresApiKey = transcriptModelConfig.provider === 'deepgram' || transcriptModelConfig.provider === 'elevenLabs' || transcriptModelConfig.provider === 'openai' || transcriptModelConfig.provider === 'groq';
+    const requiresApiKey = uiProvider === 'deepgram' || uiProvider === 'elevenLabs' || uiProvider === 'openai' || uiProvider === 'groq';
 
     const handleInputClick = () => {
         if (isApiKeyLocked) {
             setIsLockButtonVibrating(true);
             setTimeout(() => setIsLockButtonVibrating(false), 500);
+        }
+    };
+
+    // Cloud providers have no local model manager, so they need an explicit
+    // save that persists provider + model + API key together.
+    const handleCloudSave = async () => {
+        const options = modelOptions[uiProvider] ?? [];
+        const model = options.includes(transcriptModelConfig.model)
+            ? transcriptModelConfig.model
+            : options[0];
+        const key = apiKey?.trim();
+        if (!key) {
+            toast.error('Enter your API key first');
+            return;
+        }
+        setIsSaving(true);
+        try {
+            await invoke('api_save_transcript_config', { provider: uiProvider, model, apiKey: key });
+            setTranscriptModelConfig({ provider: uiProvider, model, apiKey: key });
+            toast.success('Transcription provider saved', {
+                description: `Using ${model} (applies to your next recording).`,
+            });
+            if (onModelSelect) {
+                onModelSelect();
+            }
+        } catch (err) {
+            console.error('Failed to save transcript config:', err);
+            toast.error('Failed to save transcription settings');
+        } finally {
+            setIsSaving(false);
         }
     };
 
@@ -123,8 +155,8 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 <SelectContent>
                                     <SelectItem value="parakeet">⚡ Parakeet (Recommended - Real-time / Accurate)</SelectItem>
                                     <SelectItem value="localWhisper">🏠 Local Whisper (High Accuracy)</SelectItem>
+                                    <SelectItem value="elevenLabs">☁️ ElevenLabs Scribe (Cloud - Best multilingual)</SelectItem>
                                     {/* <SelectItem value="deepgram">☁️ Deepgram (Backup)</SelectItem>
-                                    <SelectItem value="elevenLabs">☁️ ElevenLabs</SelectItem>
                                     <SelectItem value="groq">☁️ Groq</SelectItem>
                                     <SelectItem value="openai">☁️ OpenAI</SelectItem> */}
                                 </SelectContent>
@@ -132,7 +164,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
 
                             {uiProvider !== 'localWhisper' && uiProvider !== 'parakeet' && (
                                 <Select
-                                    value={transcriptModelConfig.model}
+                                    value={modelOptions[uiProvider].includes(transcriptModelConfig.model) ? transcriptModelConfig.model : ''}
                                     onValueChange={(value) => {
                                         const model = value as TranscriptModelProps['model'];
                                         setTranscriptModelConfig({ ...transcriptModelConfig, provider: uiProvider, model });
@@ -216,6 +248,23 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                         {showApiKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                                     </Button>
                                 </div>
+                            </div>
+                            {uiProvider === 'elevenLabs' && (
+                                <p className="text-xs text-gray-500 mt-2 mx-1">
+                                    Audio is sent to ElevenLabs for transcription (not local).
+                                    Best accuracy for Persian, Arabic and 90+ languages.
+                                    Get a key at elevenlabs.io.
+                                </p>
+                            )}
+                            <div className="mt-3 mx-1">
+                                <Button
+                                    type="button"
+                                    onClick={handleCloudSave}
+                                    disabled={isSaving}
+                                    className="bg-blue-600 hover:bg-blue-700 text-white"
+                                >
+                                    {isSaving ? 'Saving…' : 'Save & Use'}
+                                </Button>
                             </div>
                         </div>
                     )}

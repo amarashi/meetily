@@ -22,6 +22,23 @@ export type Engine = 'whisper' | 'parakeet';
 export const PARAKEET_PREFERRED: ReadonlySet<string> = new Set(['en']);
 
 /**
+ * Cloud providers that transcribe every language well (e.g. ElevenLabs Scribe
+ * covers 90+ languages). When one of these is the active provider, switching
+ * the transcription language must never yank the user back to a local engine —
+ * they opted into the cloud provider explicitly.
+ */
+export const MULTILINGUAL_CLOUD_PROVIDERS: ReadonlySet<string> = new Set([
+  'elevenLabs',
+  'deepgram',
+  'groq',
+  'openai',
+]);
+
+export function isMultilingualCloudProvider(provider: string | undefined): boolean {
+  return !!provider && MULTILINGUAL_CLOUD_PROVIDERS.has(provider);
+}
+
+/**
  * Preferred engine for a language code, or null for the auto-detect modes
  * (where we deliberately leave the user's engine choice untouched).
  */

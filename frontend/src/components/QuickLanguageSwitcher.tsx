@@ -12,6 +12,7 @@ import {
   bestAvailableModel,
   engineToProvider,
   providerToEngine,
+  isMultilingualCloudProvider,
   type AvailableModel,
 } from '@/lib/transcript-engine-policy';
 
@@ -90,6 +91,10 @@ export function QuickLanguageSwitcher() {
    * the user to download one instead of leaving them in a broken state.
    */
   async function autoSelectEngine(code: string) {
+    // A multilingual cloud provider (e.g. ElevenLabs Scribe) handles every
+    // language — the user chose it deliberately, so never override it here.
+    if (isMultilingualCloudProvider(transcriptModelConfig?.provider)) return;
+
     const preferred = preferredEngineForLanguage(code);
     if (!preferred) return; // auto / auto-translate: leave the engine untouched
 
