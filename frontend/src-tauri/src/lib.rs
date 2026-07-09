@@ -41,6 +41,7 @@ pub mod audio;
 pub mod config;
 pub mod console_utils;
 pub mod database;
+pub mod dictation;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -436,11 +437,14 @@ pub fn run() {
         builder = builder.plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
-                    if event.state() == ShortcutState::Pressed
-                        && shortcut.matches(Modifiers::SUPER, Code::KeyZ)
-                    {
-                        log::info!("Global shortcut Win+Z pressed: toggling recording");
-                        tray::toggle_recording_handler(app);
+                    if event.state() == ShortcutState::Pressed {
+                        if shortcut.matches(Modifiers::SUPER, Code::KeyZ) {
+                            log::info!("Global shortcut Win+Z pressed: toggling recording");
+                            tray::toggle_recording_handler(app);
+                        } else if shortcut.matches(Modifiers::SUPER | Modifiers::SHIFT, Code::KeyZ) {
+                            log::info!("Global shortcut Win+Shift+Z pressed: toggling dictation");
+                            dictation::toggle_dictation(app);
+                        }
                     }
                 })
                 .build(),
@@ -470,6 +474,14 @@ pub fn run() {
                 match _app.handle().global_shortcut().register(shortcut) {
                     Ok(_) => log::info!("Registered global shortcut Win+Z for recording toggle"),
                     Err(e) => log::error!("Failed to register global shortcut Win+Z: {}", e),
+                }
+
+                // Register the global dictation toggle shortcut (Win+Shift+Z).
+                let dictation_shortcut =
+                    Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyZ);
+                match _app.handle().global_shortcut().register(dictation_shortcut) {
+                    Ok(_) => log::info!("Registered global shortcut Win+Shift+Z for dictation toggle"),
+                    Err(e) => log::error!("Failed to register global shortcut Win+Shift+Z: {}", e),
                 }
             }
 

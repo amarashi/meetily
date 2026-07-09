@@ -226,6 +226,12 @@ pub fn start_transcription_task<R: Runtime>(
                                                 worker_id, e
                                             );
                                         }
+
+                                        // Dictation mode: also type the segment into the
+                                        // currently focused window (system-wide voice typing)
+                                        if crate::dictation::is_dictation_active() {
+                                            crate::dictation::type_transcribed_text(&update.text);
+                                        }
                                         // PERFORMANCE: Removed verbose logging of every emission
                                     } else if !transcript.trim().is_empty() && should_log_this_chunk
                                     {
