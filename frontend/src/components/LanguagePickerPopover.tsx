@@ -4,6 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { LANGUAGE_OPTIONS } from "@/lib/summary-languages";
 import { useRecentLanguages } from "@/hooks/useRecentLanguages";
 
+/** Languages pinned to the top of the picker, in display order. */
+const PINNED_CODES = ["en", "fa"];
+
 interface LanguagePickerPopoverProps {
   value: string | null;
   onChange: (code: string | null) => void;
@@ -47,10 +50,26 @@ export function LanguagePickerPopover({
 
   const recentCodes = useMemo(() => new Set(recents), [recents]);
 
+  // English and Persian are the user's working languages — always shown first.
+  const pinnedResolved = useMemo(
+    () =>
+      PINNED_CODES
+        .map((code) => LANGUAGE_OPTIONS.find((l) => l.code === code))
+        .filter((l): l is (typeof LANGUAGE_OPTIONS)[number] => Boolean(l))
+        .filter(
+          (l) =>
+            !filter ||
+            l.code.toLowerCase().includes(filter) ||
+            l.label.toLowerCase().includes(filter),
+        ),
+    [filter],
+  );
+
   const filteredAll = useMemo(() => {
-    const options = mode === "meeting"
+    const options = (mode === "meeting"
       ? LANGUAGE_OPTIONS.filter((l) => !recentCodes.has(l.code))
-      : LANGUAGE_OPTIONS;
+      : LANGUAGE_OPTIONS
+    ).filter((l) => !PINNED_CODES.includes(l.code));
     if (!filter) return options;
     return options.filter(
       (l) =>
@@ -62,6 +81,7 @@ export function LanguagePickerPopover({
   const recentsResolved = useMemo(
     () =>
       recents
+        .filter((code) => !PINNED_CODES.includes(code))
         .map((code) => LANGUAGE_OPTIONS.find((l) => l.code === code))
         .filter((l): l is (typeof LANGUAGE_OPTIONS)[number] => Boolean(l))
         .filter(
@@ -76,7 +96,10 @@ export function LanguagePickerPopover({
   const showAuto = mode === "meeting" && (!filter || "auto".includes(filter));
   const showRecents = mode === "meeting" && recentsResolved.length > 0;
   const hasNoResults =
-    filteredAll.length === 0 && recentsResolved.length === 0 && !showAuto;
+    filteredAll.length === 0 &&
+    recentsResolved.length === 0 &&
+    pinnedResolved.length === 0 &&
+    !showAuto;
 
   return (
     <div
@@ -98,6 +121,29 @@ export function LanguagePickerPopover({
       </div>
 
       <div className="max-h-80 overflow-y-auto py-1">
+        {pinnedResolved.length > 0 && (
+          <>
+            {pinnedResolved.map((opt) => (
+              <button
+                key={`pinned-${opt.code}`}
+                type="button"
+                aria-pressed={value === opt.code}
+                onClick={() => onChange(opt.code)}
+                className={`flex w-full items-center justify-between px-3 py-1.5 text-sm hover:bg-gray-50 text-left ${
+                  value === opt.code ? "text-blue-600 font-medium" : "text-gray-800"
+                }`}
+              >
+                <span>
+                  {opt.label}{" "}
+                  <span className="text-xs text-gray-400">({opt.code})</span>
+                </span>
+                {value === opt.code && <span className="text-blue-600" aria-hidden="true">✓</span>}
+              </button>
+            ))}
+            <div className="my-1 h-px bg-gray-100" />
+          </>
+        )}
+
         {showRecents && (
           <>
             <div className="px-3 pt-1 pb-1 text-[10px] font-semibold uppercase tracking-wider text-gray-400">

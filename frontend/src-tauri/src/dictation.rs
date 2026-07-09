@@ -10,7 +10,7 @@
 
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -39,9 +39,18 @@ pub struct DictationSettings {
     /// Ollama endpoint the cleanup requests are sent to.
     #[serde(default = "default_ollama_endpoint")]
     pub ollama_endpoint: String,
+    /// Show a review popup (original vs cleaned, editable) whenever the
+    /// cleanup pass changed the text, instead of typing the result silently.
+    /// Auto-accepts after a few seconds so hands-free dictation keeps flowing.
+    #[serde(default = "default_review_enabled")]
+    pub review_enabled: bool,
 }
 
 fn default_cleanup_enabled() -> bool {
+    true
+}
+
+fn default_review_enabled() -> bool {
     true
 }
 
@@ -59,6 +68,7 @@ impl Default for DictationSettings {
             cleanup_enabled: default_cleanup_enabled(),
             cleanup_model: default_cleanup_model(),
             ollama_endpoint: default_ollama_endpoint(),
+            review_enabled: default_review_enabled(),
         }
     }
 }
@@ -181,7 +191,7 @@ async fn start_dictation<R: Runtime>(app: &AppHandle<R>) {
     .await
     {
         Ok(()) => {
-            start_typing_worker(load_dictation_settings(app).await);
+            start_typing_worker(app.clone(), load_dictation_settings(app).await);
             DICTATION_ACTIVE.store(true, Ordering::SeqCst);
             show_indicator(app);
             notify(
@@ -268,15 +278,15 @@ pub fn enqueue_transcribed_text(text: &str) {
 /// Spawn the per-session typing worker: receives raw segments in spoken order,
 /// runs the LLM cleanup pass (when enabled), and types the result. Runs off the
 /// transcription worker so cleanup latency never delays transcription itself.
-fn start_typing_worker(settings: DictationSettings) {
+fn start_typing_worker<R: Runtime>(app: AppHandle<R>, settings: DictationSettings) {
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     if let Ok(mut sender) = TYPING_SENDER.write() {
         *sender = Some(tx);
     }
 
     info!(
-        "Dictation typing worker started (cleanup: {}, model: {})",
-        settings.cleanup_enabled, settings.cleanup_model
+        "Dictation typing worker started (cleanup: {}, model: {}, review: {})",
+        settings.cleanup_enabled, settings.cleanup_model, settings.review_enabled
     );
 
     tauri::async_runtime::spawn(async move {
@@ -301,8 +311,17 @@ fn start_typing_worker(settings: DictationSettings) {
                 match cleanup_segment(&client, &settings, &system_prompt, &raw).await {
                     Ok(cleaned) => {
                         consecutive_failures = 0;
-                        // An empty result means the segment was pure filler.
-                        if !cleaned.is_empty() {
+                        if cleaned == raw {
+                            // Nothing changed — no review needed.
+                            type_transcribed_text(&cleaned);
+                        } else if settings.review_enabled {
+                            // Let the user accept/reject/edit the change.
+                            // (An empty `cleaned` means "pure filler, drop it" —
+                            // the review popup lets the user veto that too.)
+                            if let Some(text) = request_review(&app, &raw, &cleaned).await {
+                                type_transcribed_text(&text);
+                            }
+                        } else if !cleaned.is_empty() {
                             type_transcribed_text(&cleaned);
                         }
                     }
@@ -323,6 +342,7 @@ fn start_typing_worker(settings: DictationSettings) {
             }
         }
 
+        hide_review_window(&app);
         info!("Dictation typing worker finished");
     });
 }
@@ -394,6 +414,214 @@ async fn cleanup_segment(
 
     Ok(cleaned.to_string())
 }
+
+// ============================================================================
+// CLEANUP REVIEW POPUP
+//
+// When the cleanup pass changes a segment, a small always-on-top window shows
+// the original and the cleaned text (editable) with Accept / Reject buttons.
+// The popup auto-accepts after a few seconds so hands-free dictation flows;
+// interacting with it pauses the countdown. Because clicking the popup moves
+// keyboard focus, the previously focused window is captured before the review
+// and restored before typing.
+// ============================================================================
+
+const REVIEW_LABEL: &str = "dictation-review";
+const REVIEW_WIDTH: f64 = 420.0;
+const REVIEW_HEIGHT: f64 = 232.0;
+/// Page-side auto-accept countdown; the Rust fallback below must be longer.
+const REVIEW_PAGE_TIMEOUT_MS: u64 = 8_000;
+/// Hard cap in case the popup fails or the page never replies. Generous so a
+/// user actively editing the text isn't cut off mid-edit.
+const REVIEW_HARD_TIMEOUT: Duration = Duration::from_secs(120);
+
+static REVIEW_ID: AtomicU64 = AtomicU64::new(0);
+static REVIEW_WAITER: RwLock<Option<(u64, tokio::sync::oneshot::Sender<ReviewDecision>)>> =
+    RwLock::new(None);
+
+#[derive(Debug)]
+struct ReviewDecision {
+    accepted: bool,
+    /// Final text when accepted (the possibly hand-edited cleaned text).
+    text: String,
+}
+
+#[derive(Clone, Serialize)]
+struct ReviewRequest<'a> {
+    id: u64,
+    original: &'a str,
+    cleaned: &'a str,
+    timeout_ms: u64,
+}
+
+/// Show the review popup for one segment and wait for the user's decision.
+/// Returns the text to type, or None when the segment should be dropped
+/// (user accepted an empty cleanup = pure filler).
+async fn request_review<R: Runtime>(app: &AppHandle<R>, raw: &str, cleaned: &str) -> Option<String> {
+    // Where should the text land afterwards? Capture before the popup can
+    // steal focus via user clicks.
+    let target_window = foreground_window();
+
+    let Some(win) = show_review_window(app) else {
+        // Popup unavailable — behave as if review were disabled.
+        return if cleaned.is_empty() { None } else { Some(cleaned.to_string()) };
+    };
+
+    let id = REVIEW_ID.fetch_add(1, Ordering::SeqCst) + 1;
+    let (tx, rx) = tokio::sync::oneshot::channel::<ReviewDecision>();
+    if let Ok(mut waiter) = REVIEW_WAITER.write() {
+        *waiter = Some((id, tx));
+    }
+
+    if let Err(e) = win.emit(
+        "dictation-review",
+        ReviewRequest {
+            id,
+            original: raw,
+            cleaned,
+            timeout_ms: REVIEW_PAGE_TIMEOUT_MS,
+        },
+    ) {
+        warn!("Failed to send review request to popup: {}", e);
+    }
+
+    let decision = match tokio::time::timeout(REVIEW_HARD_TIMEOUT, rx).await {
+        Ok(Ok(decision)) => decision,
+        // Timeout or popup gone: auto-accept the cleaned text.
+        _ => ReviewDecision {
+            accepted: true,
+            text: cleaned.to_string(),
+        },
+    };
+
+    if let Ok(mut waiter) = REVIEW_WAITER.write() {
+        *waiter = None;
+    }
+    let _ = win.hide();
+
+    // If the user clicked the popup, focus moved there — give it back to the
+    // dictation target before typing.
+    restore_foreground_window(target_window);
+    tokio::time::sleep(Duration::from_millis(120)).await;
+
+    let text = if decision.accepted { decision.text } else { raw.to_string() };
+    let text = text.trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Decision reply from the review popup page.
+#[tauri::command]
+pub fn dictation_review_decision(id: u64, accepted: bool, text: Option<String>) -> Result<(), String> {
+    let waiter = REVIEW_WAITER
+        .write()
+        .map_err(|_| "review state poisoned".to_string())?
+        .take_if(|(pending_id, _)| *pending_id == id);
+
+    match waiter {
+        Some((_, tx)) => {
+            let _ = tx.send(ReviewDecision {
+                accepted,
+                text: text.unwrap_or_default(),
+            });
+            Ok(())
+        }
+        None => {
+            warn!("Stale or unknown dictation review reply (id {})", id);
+            Ok(())
+        }
+    }
+}
+
+/// Create (or reuse) the review popup above the dictation indicator.
+/// Created unfocused so merely appearing never interrupts typing focus.
+fn show_review_window<R: Runtime>(app: &AppHandle<R>) -> Option<tauri::WebviewWindow<R>> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    if let Some(win) = app.get_webview_window(REVIEW_LABEL) {
+        let _ = win.show();
+        return Some(win);
+    }
+
+    let win = match WebviewWindowBuilder::new(
+        app,
+        REVIEW_LABEL,
+        WebviewUrl::App("dictation-review.html".into()),
+    )
+    .title("Dictation review")
+    .inner_size(REVIEW_WIDTH, REVIEW_HEIGHT)
+    .decorations(false)
+    .transparent(true)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .focused(false)
+    .shadow(false)
+    .build()
+    {
+        Ok(win) => win,
+        Err(e) => {
+            warn!("Failed to create dictation review window: {}", e);
+            return None;
+        }
+    };
+
+    // Bottom-right, stacked above the indicator pill.
+    if let Ok(Some(monitor)) = win.primary_monitor() {
+        let scale = monitor.scale_factor();
+        let size = monitor.size();
+        let pos = monitor.position();
+        let w = (REVIEW_WIDTH * scale) as i32;
+        let h = (REVIEW_HEIGHT * scale) as i32;
+        let margin = (16.0 * scale) as i32;
+        let taskbar_clearance = (48.0 * scale) as i32;
+        let indicator_clearance = ((INDICATOR_HEIGHT + 8.0) * scale) as i32;
+        let x = pos.x + size.width as i32 - w - margin;
+        let y = pos.y + size.height as i32 - h - margin - taskbar_clearance - indicator_clearance;
+        if let Err(e) = win.set_position(tauri::PhysicalPosition::new(x, y)) {
+            warn!("Failed to position dictation review window: {}", e);
+        }
+    }
+
+    Some(win)
+}
+
+fn hide_review_window<R: Runtime>(app: &AppHandle<R>) {
+    if let Some(win) = app.get_webview_window(REVIEW_LABEL) {
+        if let Err(e) = win.close() {
+            warn!("Failed to close dictation review window: {}", e);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn foreground_window() -> isize {
+    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() as isize }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn foreground_window() -> isize {
+    0
+}
+
+/// Re-activate the window that had focus when the review started, but only if
+/// focus actually moved (i.e. the user clicked the popup).
+#[cfg(target_os = "windows")]
+fn restore_foreground_window(target: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetForegroundWindow};
+    if target == 0 {
+        return;
+    }
+    unsafe {
+        if GetForegroundWindow() as isize != target {
+            if SetForegroundWindow(target as _) == 0 {
+                warn!("Could not restore focus to the dictation target window");
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_foreground_window(_target: isize) {}
 
 /// Type a transcribed segment into the currently focused window, followed by a
 /// trailing space so consecutive segments don't run together.

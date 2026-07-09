@@ -742,6 +742,9 @@ pub fn run() {
             summary::template_commands::api_list_templates,
             summary::template_commands::api_get_template_details,
             summary::template_commands::api_validate_template,
+            summary::template_commands::api_get_template_content,
+            summary::template_commands::api_save_template,
+            summary::template_commands::api_delete_template,
             // Built-in AI commands
             summary::summary_engine::commands::builtin_ai_list_models,
             summary::summary_engine::commands::builtin_ai_get_model_info,
@@ -754,6 +757,7 @@ pub fn run() {
             openrouter::get_openrouter_models,
             dictation::get_dictation_settings,
             dictation::set_dictation_settings,
+            dictation::dictation_review_decision,
             dictionary::get_dictionary_entries,
             dictionary::add_dictionary_entry,
             dictionary::update_dictionary_entry,

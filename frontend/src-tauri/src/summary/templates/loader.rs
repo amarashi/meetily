@@ -117,6 +117,118 @@ pub fn get_template(template_id: &str) -> Result<Template, String> {
     validate_and_parse_template(&json_content)
 }
 
+/// Validate a template identifier for use as a file name
+///
+/// Restricts IDs to `[a-zA-Z0-9_-]` so a template ID can never escape the
+/// templates directory (path traversal) or produce an unusable file name.
+pub fn validate_template_id(template_id: &str) -> Result<(), String> {
+    if template_id.is_empty() {
+        return Err("Template ID cannot be empty".to_string());
+    }
+    if !template_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(format!(
+            "Invalid template ID '{}'. Use only letters, digits, '_' and '-'",
+            template_id
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a default (bundled or built-in) version of this template exists
+///
+/// Used to decide if deleting a custom template reverts to a default or
+/// removes the template entirely.
+pub fn has_default_template(template_id: &str) -> bool {
+    defaults::get_builtin_template(template_id).is_some()
+        || load_bundled_template(template_id).is_some()
+}
+
+/// Whether a custom (user-saved) version of this template exists
+pub fn custom_template_exists(template_id: &str) -> bool {
+    get_custom_templates_dir()
+        .map(|dir| dir.join(format!("{}.json", template_id)).exists())
+        .unwrap_or(false)
+}
+
+/// Load the raw JSON content of a template plus where it came from
+///
+/// Uses the same precedence as `get_template`: custom > bundled > built-in.
+///
+/// # Returns
+/// `(json_content, source)` where source is "custom", "bundled" or "builtin"
+pub fn get_template_raw(template_id: &str) -> Result<(String, &'static str), String> {
+    validate_template_id(template_id)?;
+
+    if let Some(content) = load_custom_template(template_id) {
+        Ok((content, "custom"))
+    } else if let Some(content) = load_bundled_template(template_id) {
+        Ok((content, "bundled"))
+    } else if let Some(content) = defaults::get_builtin_template(template_id) {
+        Ok((content.to_string(), "builtin"))
+    } else {
+        Err(format!(
+            "Template '{}' not found. Available templates: {}",
+            template_id,
+            list_template_ids().join(", ")
+        ))
+    }
+}
+
+/// Save a template to the user's custom templates directory
+///
+/// Validates the JSON first; saving over a built-in/bundled ID creates a
+/// custom override (the default stays untouched on disk and can be restored
+/// by deleting the override).
+pub fn save_custom_template(template_id: &str, json_content: &str) -> Result<Template, String> {
+    validate_template_id(template_id)?;
+    let template = validate_and_parse_template(json_content)?;
+
+    let custom_dir = get_custom_templates_dir()
+        .ok_or_else(|| "Could not resolve the user data directory".to_string())?;
+    std::fs::create_dir_all(&custom_dir)
+        .map_err(|e| format!("Failed to create templates directory: {}", e))?;
+
+    // Re-serialize so files on disk are consistently pretty-printed.
+    let pretty = serde_json::to_string_pretty(&template)
+        .map_err(|e| format!("Failed to serialize template: {}", e))?;
+
+    let path = custom_dir.join(format!("{}.json", template_id));
+    std::fs::write(&path, pretty)
+        .map_err(|e| format!("Failed to write template file: {}", e))?;
+
+    info!("Saved custom template '{}' to {:?}", template_id, path);
+    Ok(template)
+}
+
+/// Delete a template from the user's custom templates directory
+///
+/// If the ID also has a bundled/built-in default, this reverts the template
+/// to that default rather than removing it from the list.
+pub fn delete_custom_template(template_id: &str) -> Result<(), String> {
+    validate_template_id(template_id)?;
+
+    let custom_dir = get_custom_templates_dir()
+        .ok_or_else(|| "Could not resolve the user data directory".to_string())?;
+    let path = custom_dir.join(format!("{}.json", template_id));
+
+    if !path.exists() {
+        return Err(if has_default_template(template_id) {
+            format!("Template '{}' is a default template and cannot be deleted", template_id)
+        } else {
+            format!("Template '{}' not found", template_id)
+        });
+    }
+
+    std::fs::remove_file(&path)
+        .map_err(|e| format!("Failed to delete template file: {}", e))?;
+
+    info!("Deleted custom template '{}' at {:?}", template_id, path);
+    Ok(())
+}
+
 /// Validate and parse template JSON
 ///
 /// # Arguments

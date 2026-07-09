@@ -12,6 +12,7 @@ interface DictationSettings {
   cleanup_enabled: boolean;
   cleanup_model: string;
   ollama_endpoint: string;
+  review_enabled: boolean;
 }
 
 interface DictionaryEntry {
@@ -270,6 +271,27 @@ export function PreferenceSettings() {
                 handles both English and Persian well (install with{' '}
                 <span className="font-mono">ollama pull gemma3:4b</span>).
               </p>
+            </div>
+          )}
+
+          {dictationSettings?.cleanup_enabled && (
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-700">Review changes before typing</p>
+                <p className="text-xs text-gray-500">
+                  When cleanup modifies a segment, show original vs. cleaned text with
+                  Accept / Reject / edit. Auto-accepts after a few seconds if you don&apos;t react.
+                </p>
+              </div>
+              <Switch
+                checked={dictationSettings?.review_enabled ?? true}
+                onCheckedChange={(checked) => {
+                  if (dictationSettings) {
+                    updateDictationSettings({ ...dictationSettings, review_enabled: checked });
+                  }
+                }}
+                disabled={!dictationSettings}
+              />
             </div>
           )}
         </div>

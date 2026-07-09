@@ -22,6 +22,7 @@
             }
         ],
         "macOSPrivateApi": true,
+        "withGlobalTauri": true,
         "security": {
             "csp": {
                 "default-src": "'self'",
@@ -73,6 +74,17 @@
                                 }
                             ]
                         }
+                    ]
+                },
+                {
+                    "identifier": "dictation-review",
+                    "description": "Dictation cleanup review popup: listen for review requests, reply via app commands",
+                    "windows": [
+                        "dictation-review"
+                    ],
+                    "permissions": [
+                        "core:event:default",
+                        "core:window:default"
                     ]
                 }
             ]

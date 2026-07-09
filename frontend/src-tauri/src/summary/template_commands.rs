@@ -95,6 +95,95 @@ pub async fn api_get_template_details<R: Runtime>(
     Ok(details)
 }
 
+/// Raw template content for the template editor UI
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TemplateContent {
+    /// Template identifier
+    pub id: String,
+
+    /// Raw JSON content of the template
+    pub content: String,
+
+    /// Where the active version comes from: "custom", "bundled" or "builtin"
+    pub source: String,
+
+    /// Whether a bundled/built-in default exists for this ID
+    /// (if true, deleting the custom version reverts to the default)
+    pub has_default: bool,
+}
+
+/// Gets the raw JSON content of a template for editing
+///
+/// # Arguments
+/// * `template_id` - Template identifier (e.g., "daily_standup")
+#[tauri::command]
+pub async fn api_get_template_content<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<TemplateContent, String> {
+    info!("api_get_template_content called for template_id: {}", template_id);
+
+    let (content, source) = templates::get_template_raw(&template_id)?;
+
+    Ok(TemplateContent {
+        has_default: templates::has_default_template(&template_id),
+        id: template_id,
+        content,
+        source: source.to_string(),
+    })
+}
+
+/// Saves a template to the user's custom templates directory
+///
+/// Validates the JSON first. Saving with a built-in/bundled ID creates a
+/// custom override; deleting that override later restores the default.
+///
+/// # Arguments
+/// * `template_id` - Target identifier (letters, digits, '_' and '-' only)
+/// * `template_json` - Raw JSON content of the template
+///
+/// # Returns
+/// The saved template's display name
+#[tauri::command]
+pub async fn api_save_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+    template_json: String,
+) -> Result<String, String> {
+    info!("api_save_template called for template_id: {}", template_id);
+
+    match templates::save_custom_template(&template_id, &template_json) {
+        Ok(template) => {
+            info!("Template '{}' saved as '{}'", template.name, template_id);
+            Ok(template.name)
+        }
+        Err(e) => {
+            warn!("Failed to save template '{}': {}", template_id, e);
+            Err(e)
+        }
+    }
+}
+
+/// Deletes a custom template (or custom override of a default template)
+///
+/// # Arguments
+/// * `template_id` - Template identifier
+///
+/// # Returns
+/// `true` if a bundled/built-in default remains (the template reverted to it),
+/// `false` if the template is gone entirely
+#[tauri::command]
+pub async fn api_delete_template<R: Runtime>(
+    _app: tauri::AppHandle<R>,
+    template_id: String,
+) -> Result<bool, String> {
+    info!("api_delete_template called for template_id: {}", template_id);
+
+    templates::delete_custom_template(&template_id)?;
+
+    Ok(templates::has_default_template(&template_id))
+}
+
 /// Validates a custom template JSON string
 ///
 /// Useful for template editor UI or validation before saving custom templates

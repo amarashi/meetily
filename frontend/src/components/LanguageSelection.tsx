@@ -132,9 +132,15 @@ export function LanguageSelection({
 
   // Parakeet only supports auto-detection (doesn't support manual language selection)
   const isParakeet = provider === 'parakeet';
+  // English and Persian are the user's working languages — surface them right
+  // after the auto modes instead of burying them in the alphabetical list.
+  const PINNED_CODES = ['auto', 'auto-translate', 'en', 'fa'];
   const availableLanguages = isParakeet
     ? LANGUAGES.filter(lang => lang.code === 'auto' || lang.code === 'auto-translate')
-    : LANGUAGES;
+    : [
+        ...PINNED_CODES.map(code => LANGUAGES.find(lang => lang.code === code)!),
+        ...LANGUAGES.filter(lang => !PINNED_CODES.includes(lang.code)),
+      ];
 
   const handleLanguageChange = async (languageCode: string) => {
     setSaving(true);

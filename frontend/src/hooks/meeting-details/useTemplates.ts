@@ -11,23 +11,28 @@ export function useTemplates() {
   }>>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string>('standard_meeting');
 
+  const refreshTemplates = useCallback(async () => {
+    try {
+      const templates = await invokeTauri('api_list_templates') as Array<{
+        id: string;
+        name: string;
+        description: string;
+      }>;
+      console.log('Available templates:', templates);
+      setAvailableTemplates(templates);
+      // If the selected template was deleted in the editor, fall back to the default.
+      setSelectedTemplate((current) =>
+        templates.some((t) => t.id === current) ? current : 'standard_meeting',
+      );
+    } catch (error) {
+      console.error('Failed to fetch templates:', error);
+    }
+  }, []);
+
   // Fetch available templates on mount
   useEffect(() => {
-    const fetchTemplates = async () => {
-      try {
-        const templates = await invokeTauri('api_list_templates') as Array<{
-          id: string;
-          name: string;
-          description: string;
-        }>;
-        console.log('Available templates:', templates);
-        setAvailableTemplates(templates);
-      } catch (error) {
-        console.error('Failed to fetch templates:', error);
-      }
-    };
-    fetchTemplates();
-  }, []);
+    refreshTemplates();
+  }, [refreshTemplates]);
 
   // Handle template selection
   const handleTemplateSelection = useCallback((templateId: string, templateName: string) => {
@@ -42,5 +47,6 @@ export function useTemplates() {
     availableTemplates,
     selectedTemplate,
     handleTemplateSelection,
+    refreshTemplates,
   };
 }
