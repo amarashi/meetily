@@ -10,6 +10,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import Analytics from '@/lib/analytics';
 import { useRecordingState } from '@/contexts/RecordingStateContext';
+import { QuickLanguageSwitcher } from '@/components/QuickLanguageSwitcher';
 
 interface RecordingControlsProps {
   isRecording: boolean;
@@ -387,6 +388,10 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
                 </>
               ) : (
                 <>
+                  {/* Quick transcription-language switcher (works live, mid-recording) */}
+                  <QuickLanguageSwitcher />
+                  <div className="w-px h-6 bg-gray-200 mx-1" />
+
                   {!isRecording ? (
                     // Start recording button
                     <Tooltip>
