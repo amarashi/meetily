@@ -95,11 +95,24 @@ impl TranscriptionProvider for ElevenLabsProvider {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            let message = match status.as_u16() {
-                401 => "Invalid ElevenLabs API key. Check it in Settings → Transcription Models."
-                    .to_string(),
-                429 => "ElevenLabs rate limit or quota exceeded.".to_string(),
-                _ => format!(
+            // ElevenLabs errors carry the real reason in {"detail": {"message": ...}}
+            // (e.g. a 401 can mean quota_exceeded, not a bad key) — surface it.
+            let detail = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| {
+                    v.get("detail")?
+                        .get("message")?
+                        .as_str()
+                        .map(str::to_string)
+                });
+            let message = match (detail, status.as_u16()) {
+                (Some(m), _) => format!("ElevenLabs: {}", m),
+                (None, 401) => {
+                    "Invalid ElevenLabs API key. Check it in Settings → Transcription Models."
+                        .to_string()
+                }
+                (None, 429) => "ElevenLabs rate limit or quota exceeded.".to_string(),
+                (None, _) => format!(
                     "ElevenLabs API error {}: {}",
                     status,
                     body.chars().take(300).collect::<String>()
