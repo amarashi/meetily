@@ -415,7 +415,12 @@ pub async fn generate_meeting_summary(
             info!("Split transcript into {} chunks", num_chunks);
 
             let mut chunk_summaries = Vec::new();
-            let system_prompt_chunk = "You are an expert meeting summarizer.";
+            // The chunk pass reads the raw transcript, so give it the user's
+            // glossary to fix mistranscribed names, abbreviations, and jargon.
+            let system_prompt_chunk = format!(
+                "You are an expert meeting summarizer.{}",
+                crate::dictionary::glossary_prompt_section()
+            );
 
             for (i, chunk) in chunks.iter().enumerate() {
                 // Check for cancellation before processing each chunk
@@ -434,7 +439,7 @@ pub async fn generate_meeting_summary(
                     provider,
                     model_name,
                     api_key,
-                    system_prompt_chunk,
+                    &system_prompt_chunk,
                     &user_prompt_chunk,
                     ollama_endpoint,
                     custom_openai_endpoint,
@@ -509,10 +514,16 @@ pub async fn generate_meeting_summary(
         let clean_template_markdown = template.to_markdown_structure();
         let section_instructions = template.to_section_instructions();
 
-        let final_system_prompt = build_final_report_system_prompt(
-            &section_instructions,
-            &clean_template_markdown,
-            direct_language,
+        // Small transcripts skip the chunk pass, so the final prompt is the
+        // first LLM to see the raw transcript — it needs the glossary too.
+        let final_system_prompt = format!(
+            "{}{}",
+            build_final_report_system_prompt(
+                &section_instructions,
+                &clean_template_markdown,
+                direct_language,
+            ),
+            crate::dictionary::glossary_prompt_section()
         );
 
         let mut final_user_prompt = format!(

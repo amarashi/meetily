@@ -15,11 +15,39 @@ interface DictationSettings {
   review_enabled: boolean;
 }
 
+type DictionaryEntryKind = 'correction' | 'name' | 'abbreviation' | 'jargon' | 'term';
+
 interface DictionaryEntry {
   id: string;
   misheard: string | null;
   correct: string;
+  kind: DictionaryEntryKind;
+  meaning: string | null;
 }
+
+const ENTRY_KIND_OPTIONS: { value: DictionaryEntryKind; label: string }[] = [
+  { value: 'term', label: 'Word / phrase' },
+  { value: 'name', label: 'Name' },
+  { value: 'abbreviation', label: 'Abbreviation' },
+  { value: 'jargon', label: 'Jargon / slang' },
+  { value: 'correction', label: 'Correction' },
+];
+
+const ENTRY_KIND_LABELS: Record<DictionaryEntryKind, string> = {
+  term: 'term',
+  name: 'name',
+  abbreviation: 'abbr.',
+  jargon: 'jargon',
+  correction: 'fix',
+};
+
+const MEANING_PLACEHOLDERS: Record<DictionaryEntryKind, string> = {
+  term: 'Meaning or context (optional)',
+  name: 'Who or what it is (optional)',
+  abbreviation: 'Stands for… (e.g. Continuous Integration)',
+  jargon: 'What it means',
+  correction: 'Meaning or context (optional)',
+};
 
 export function PreferenceSettings() {
   const {
@@ -35,6 +63,8 @@ export function PreferenceSettings() {
   const [dictionaryEntries, setDictionaryEntries] = useState<DictionaryEntry[]>([]);
   const [newMisheard, setNewMisheard] = useState('');
   const [newCorrect, setNewCorrect] = useState('');
+  const [newKind, setNewKind] = useState<DictionaryEntryKind>('term');
+  const [newMeaning, setNewMeaning] = useState('');
   const [isInitialLoad, setIsInitialLoad] = useState(true);
   const [previousNotificationsEnabled, setPreviousNotificationsEnabled] = useState<boolean | null>(null);
   const hasTrackedViewRef = useRef(false);
@@ -73,13 +103,22 @@ export function PreferenceSettings() {
     const correct = newCorrect.trim();
     if (!correct) return;
     const misheard = newMisheard.trim() || null;
+    const meaning = newMeaning.trim() || null;
     try {
-      const entry = await invoke<DictionaryEntry>('add_dictionary_entry', { misheard, correct });
+      const entry = await invoke<DictionaryEntry>('add_dictionary_entry', {
+        misheard,
+        correct,
+        kind: newKind,
+        meaning,
+      });
       setDictionaryEntries((prev) =>
-        prev.some((e) => e.id === entry.id) ? prev : [...prev, entry]
+        prev.some((e) => e.id === entry.id)
+          ? prev.map((e) => (e.id === entry.id ? entry : e))
+          : [...prev, entry]
       );
       setNewMisheard('');
       setNewCorrect('');
+      setNewMeaning('');
     } catch (error) {
       console.error('Failed to add dictionary entry:', error);
     }
@@ -301,38 +340,62 @@ export function PreferenceSettings() {
       <div className="bg-white rounded-lg border border-gray-200 p-6 shadow-sm">
         <h3 className="text-lg font-semibold text-gray-900 mb-2">Dictionary</h3>
         <p className="text-sm text-gray-600 mb-4">
-          Names, companies, medications, or words you pronounce differently. Used to improve
-          transcription in meetings and dictation. Fixing a transcript in a meeting adds entries
-          here automatically.
+          Your personal glossary: names, abbreviations, jargon, or words you pronounce
+          differently — with an optional meaning so the AI recognizes them. Used to transcribe
+          these terms correctly in meetings and dictation, and to fix them when cleaning up or
+          summarizing text. Fixing a transcript in a meeting adds entries here automatically.
         </p>
 
         {/* Add entry form */}
-        <div className="flex gap-2 mb-4">
-          <input
-            type="text"
-            dir="auto"
-            value={newMisheard}
-            onChange={(e) => setNewMisheard(e.target.value)}
-            placeholder="Misheard as (optional)"
-            className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-          />
-          <input
-            type="text"
-            dir="auto"
-            value={newCorrect}
-            onChange={(e) => setNewCorrect(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleAddDictionaryEntry()}
-            placeholder="Correct word or phrase"
-            className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
-          />
-          <button
-            onClick={handleAddDictionaryEntry}
-            disabled={!newCorrect.trim()}
-            className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            <Plus className="w-4 h-4" />
-            Add
-          </button>
+        <div className="space-y-2 mb-4">
+          <div className="flex gap-2">
+            <select
+              value={newKind}
+              onChange={(e) => setNewKind(e.target.value as DictionaryEntryKind)}
+              className="px-2 py-2 text-sm border border-gray-300 rounded-md shadow-sm bg-white focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+            >
+              {ENTRY_KIND_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              dir="auto"
+              value={newCorrect}
+              onChange={(e) => setNewCorrect(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleAddDictionaryEntry()}
+              placeholder="Correct word, name, or abbreviation"
+              className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <button
+              onClick={handleAddDictionaryEntry}
+              disabled={!newCorrect.trim()}
+              className="flex items-center gap-1 px-3 py-2 text-sm font-medium text-white bg-blue-600 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Plus className="w-4 h-4" />
+              Add
+            </button>
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              dir="auto"
+              value={newMeaning}
+              onChange={(e) => setNewMeaning(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleAddDictionaryEntry()}
+              placeholder={MEANING_PLACEHOLDERS[newKind]}
+              className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+            />
+            <input
+              type="text"
+              dir="auto"
+              value={newMisheard}
+              onChange={(e) => setNewMisheard(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleAddDictionaryEntry()}
+              placeholder="Often misheard as… (optional)"
+              className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+            />
+          </div>
         </div>
 
         {/* Entries list */}
@@ -344,11 +407,18 @@ export function PreferenceSettings() {
           <div className="max-h-64 overflow-y-auto divide-y divide-gray-100 border border-gray-100 rounded-md">
             {dictionaryEntries.map((entry) => (
               <div key={entry.id} className="flex items-center gap-2 px-3 py-2 text-sm">
-                <span dir="auto" className="flex-1 text-gray-500">
-                  {entry.misheard ?? <em className="text-gray-400">any similar sound</em>}
+                <span className="shrink-0 px-1.5 py-0.5 text-xs rounded bg-gray-100 text-gray-500">
+                  {ENTRY_KIND_LABELS[entry.kind] ?? entry.kind}
                 </span>
-                <span className="text-gray-400">→</span>
-                <span dir="auto" className="flex-1 font-medium text-gray-800">{entry.correct}</span>
+                <span dir="auto" className="min-w-0 flex-1 truncate">
+                  {entry.misheard && (
+                    <span className="text-gray-500">{entry.misheard} <span className="text-gray-400">→</span> </span>
+                  )}
+                  <span className="font-medium text-gray-800">{entry.correct}</span>
+                  {entry.meaning && (
+                    <span className="text-gray-500"> — {entry.meaning}</span>
+                  )}
+                </span>
                 <button
                   onClick={() => handleDeleteDictionaryEntry(entry.id)}
                   title="Remove entry"

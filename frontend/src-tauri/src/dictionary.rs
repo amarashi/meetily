@@ -1,10 +1,11 @@
 // dictionary.rs
 //
-// User dictionary for transcription fixes: names, companies, medications, or
-// any word the user pronounces differently. Entries are either a correction
-// pair (misheard -> correct, applied deterministically to every transcribed
-// segment) or a plain vocabulary term (correct only, used to bias Whisper via
-// its initial prompt and to guide the dictation cleanup LLM).
+// User dictionary: the speaker's personal glossary. Entries are names,
+// abbreviations, jargon, or any word the user pronounces differently — each
+// with an optional meaning/expansion so LLM passes can recognize garbled
+// variants, plus an optional misheard form applied deterministically to every
+// transcribed segment. The glossary biases Whisper via its initial prompt and
+// guides the dictation-cleanup and summarization LLMs.
 //
 // Entries come from two places: manual adds in Preferences, and automatic
 // extraction when the user edits a transcript segment in meeting details.
@@ -16,15 +17,38 @@ use std::sync::RwLock;
 use tauri::{AppHandle, Runtime};
 use tauri_plugin_store::StoreExt;
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    /// A known mistranscription fix (misheard -> correct).
+    Correction,
+    /// A person, company, product, or place name.
+    Name,
+    /// An acronym or abbreviation; `meaning` holds the expansion.
+    Abbreviation,
+    /// Domain jargon or slang; `meaning` explains it.
+    Jargon,
+    /// Any other vocabulary word or phrase.
+    #[default]
+    Term,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct DictionaryEntry {
     pub id: String,
-    /// What the transcription engine typically produces (None for plain
-    /// vocabulary terms that only bias recognition/cleanup).
+    /// What the transcription engine typically produces (None when there is
+    /// no known misheard form; the entry then only biases recognition/cleanup).
     #[serde(default)]
     pub misheard: Option<String>,
     /// The correct spelling the user wants.
     pub correct: String,
+    /// What kind of term this is; shapes how LLM prompts present it.
+    #[serde(default)]
+    pub kind: EntryKind,
+    /// Meaning, expansion, or context (e.g. "Continuous Integration" for
+    /// "CI"). Given to LLMs as recognition context, never typed into text.
+    #[serde(default)]
+    pub meaning: Option<String>,
 }
 
 /// Compiled view of the dictionary, cached so the transcription hot path never
@@ -72,10 +96,19 @@ fn load_entries<R: Runtime>(app: &AppHandle<R>) -> Vec<DictionaryEntry> {
         }
     };
 
-    store
+    let mut entries: Vec<DictionaryEntry> = store
         .get("entries")
         .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // Entries saved before `kind` existed default to Term; the ones with a
+    // misheard form were corrections, so label them as such.
+    for entry in &mut entries {
+        if entry.kind == EntryKind::Term && entry.misheard.is_some() {
+            entry.kind = EntryKind::Correction;
+        }
+    }
+    entries
 }
 
 fn save_entries<R: Runtime>(app: &AppHandle<R>, entries: &[DictionaryEntry]) -> Result<(), String> {
@@ -151,10 +184,24 @@ pub fn whisper_vocabulary_hint() -> Option<String> {
     }
 }
 
-/// Dictionary section for the dictation cleanup LLM prompt: exact correction
-/// pairs plus preferred spellings, so the model fixes similar-sounding
-/// mistranscriptions the deterministic pass can't catch.
-pub fn cleanup_prompt_section() -> String {
+/// Format one entry as `term (meaning)` or just `term`.
+fn term_with_meaning(entry: &DictionaryEntry) -> Option<String> {
+    let correct = entry.correct.trim();
+    if correct.is_empty() {
+        return None;
+    }
+    match entry.meaning.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(meaning) => Some(format!("{} ({})", correct, meaning)),
+        None => Some(correct.to_string()),
+    }
+}
+
+/// Glossary section for LLM prompts (dictation cleanup and meeting
+/// summarization): known correction pairs, plus the speaker's names,
+/// abbreviations, and jargon with their meanings, so the model recognizes
+/// garbled or similar-sounding variants the deterministic pass can't catch
+/// and writes them correctly.
+pub fn glossary_prompt_section() -> String {
     let cache = match DICTIONARY.read() {
         Ok(cache) => cache,
         Err(_) => return String::new(),
@@ -166,7 +213,12 @@ pub fn cleanup_prompt_section() -> String {
         return String::new();
     }
 
-    let mut section = String::from("\n\nUser dictionary — apply these known fixes:");
+    let mut section = String::from(
+        "\n\nUser dictionary — the speaker's personal glossary. When the text contains one of \
+these terms, or a garbled/similar-sounding variant of one, write the correct form exactly as \
+listed. Meanings in parentheses are context to help you recognize the term — never insert \
+them into the output.",
+    );
 
     let corrections: Vec<String> = dict
         .entries
@@ -181,20 +233,27 @@ pub fn cleanup_prompt_section() -> String {
         })
         .collect();
     if !corrections.is_empty() {
-        section.push_str("\nCorrections (also apply when the text is merely similar-sounding): ");
+        section.push_str("\nKnown mistranscriptions (also apply when merely similar-sounding): ");
         section.push_str(&corrections.join("; "));
     }
 
-    let vocabulary: Vec<&str> = dict
-        .entries
-        .iter()
-        .filter(|e| e.misheard.as_deref().map_or(true, |m| m.trim().is_empty()))
-        .map(|e| e.correct.trim())
-        .filter(|t| !t.is_empty())
-        .collect();
-    if !vocabulary.is_empty() {
-        section.push_str("\nPreferred spellings of names and terms the speaker uses: ");
-        section.push_str(&vocabulary.join(", "));
+    let groups: [(EntryKind, &str); 4] = [
+        (EntryKind::Name, "\nNames (people, companies, products): "),
+        (EntryKind::Abbreviation, "\nAbbreviations (keep abbreviated, spelled exactly like this): "),
+        (EntryKind::Jargon, "\nJargon and slang the speaker uses: "),
+        (EntryKind::Term, "\nOther terms and preferred spellings: "),
+    ];
+    for (kind, heading) in groups {
+        let terms: Vec<String> = dict
+            .entries
+            .iter()
+            .filter(|e| e.kind == kind)
+            .filter_map(term_with_meaning)
+            .collect();
+        if !terms.is_empty() {
+            section.push_str(heading);
+            section.push_str(&terms.join("; "));
+        }
     }
 
     section
@@ -216,6 +275,8 @@ pub async fn add_dictionary_entry<R: Runtime>(
     app: AppHandle<R>,
     misheard: Option<String>,
     correct: String,
+    kind: Option<EntryKind>,
+    meaning: Option<String>,
 ) -> Result<DictionaryEntry, String> {
     let correct = correct.trim().to_string();
     if correct.is_empty() {
@@ -224,11 +285,20 @@ pub async fn add_dictionary_entry<R: Runtime>(
     let misheard = misheard
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty());
+    let meaning = meaning
+        .map(|m| m.trim().to_string())
+        .filter(|m| !m.is_empty());
+    let kind = kind.unwrap_or(if misheard.is_some() {
+        EntryKind::Correction
+    } else {
+        EntryKind::Term
+    });
 
     // Identical misheard->correct pairs would be typed twice by the corrector;
-    // treat re-adding as a no-op and return the existing entry.
+    // treat re-adding as a no-op (but pick up a newly supplied meaning) and
+    // return the existing entry.
     let mut entries = load_entries(&app);
-    if let Some(existing) = entries.iter().find(|e| {
+    if let Some(existing) = entries.iter_mut().find(|e| {
         e.correct.eq_ignore_ascii_case(&correct)
             && match (&e.misheard, &misheard) {
                 (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
@@ -236,6 +306,12 @@ pub async fn add_dictionary_entry<R: Runtime>(
                 _ => false,
             }
     }) {
+        if existing.meaning.is_none() && meaning.is_some() {
+            existing.meaning = meaning;
+            let updated = existing.clone();
+            save_entries(&app, &entries)?;
+            return Ok(updated);
+        }
         return Ok(existing.clone());
     }
 
@@ -243,13 +319,15 @@ pub async fn add_dictionary_entry<R: Runtime>(
         id: format!("dict-{}", uuid::Uuid::new_v4()),
         misheard,
         correct,
+        kind,
+        meaning,
     };
     entries.push(entry.clone());
     save_entries(&app, &entries)?;
 
     info!(
-        "Added dictionary entry: {:?} -> '{}'",
-        entry.misheard, entry.correct
+        "Added dictionary entry ({:?}): {:?} -> '{}'",
+        entry.kind, entry.misheard, entry.correct
     );
     Ok(entry)
 }

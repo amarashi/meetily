@@ -296,7 +296,7 @@ fn start_typing_worker<R: Runtime>(app: AppHandle<R>, settings: DictationSetting
         let system_prompt = format!(
             "{}{}",
             CLEANUP_SYSTEM_PROMPT,
-            crate::dictionary::cleanup_prompt_section()
+            crate::dictionary::glossary_prompt_section()
         );
         // After a few consecutive failures (Ollama down, model missing) stop
         // trying for the rest of the session instead of delaying every segment.

@@ -155,7 +155,12 @@ export default function PageContent({
       const pairs = extractCorrections(original, newText);
       for (const pair of pairs) {
         try {
-          await invoke('add_dictionary_entry', { misheard: pair.misheard, correct: pair.correct });
+          await invoke('add_dictionary_entry', {
+            misheard: pair.misheard,
+            correct: pair.correct,
+            kind: 'correction',
+            meaning: null,
+          });
           learned++;
         } catch (error) {
           console.error('Failed to add dictionary entry:', error);
