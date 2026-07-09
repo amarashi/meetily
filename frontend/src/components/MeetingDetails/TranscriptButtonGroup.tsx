@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { ButtonGroup } from '@/components/ui/button-group';
-import { Copy, FolderOpen, RefreshCw, Users } from 'lucide-react';
+import { Copy, FolderOpen, RefreshCw, Undo2, Users } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import Analytics from '@/lib/analytics';
@@ -32,13 +32,58 @@ export function TranscriptButtonGroup({
   const { betaFeatures } = useConfig();
   const [showRetranscribeDialog, setShowRetranscribeDialog] = useState(false);
   const [isDetectingSpeakers, setIsDetectingSpeakers] = useState(false);
+  const [backupCount, setBackupCount] = useState(0);
+  const [isRestoring, setIsRestoring] = useState(false);
+
+  const refreshBackupCount = useCallback(async () => {
+    if (!meetingFolderPath) {
+      setBackupCount(0);
+      return;
+    }
+    try {
+      const count = await invoke<number>('list_transcript_backups_command', {
+        meetingFolderPath,
+      });
+      setBackupCount(count);
+    } catch {
+      setBackupCount(0);
+    }
+  }, [meetingFolderPath]);
+
+  useEffect(() => {
+    refreshBackupCount();
+  }, [refreshBackupCount]);
 
   const handleRetranscribeComplete = useCallback(async () => {
     // Refetch transcripts to show the updated data
     if (onRefetchTranscripts) {
       await onRefetchTranscripts();
     }
-  }, [onRefetchTranscripts]);
+    await refreshBackupCount();
+  }, [onRefetchTranscripts, refreshBackupCount]);
+
+  // Undo the last Enhance: restore the pre-retranscription transcript backup
+  const handleUndoEnhance = useCallback(async () => {
+    if (!meetingId || !meetingFolderPath || isRestoring) return;
+    setIsRestoring(true);
+    try {
+      const restored = await invoke<number>('restore_transcript_backup_command', {
+        meetingId,
+        meetingFolderPath,
+      });
+      toast.success('Previous transcript restored', {
+        description: `${restored} segments recovered.`,
+      });
+      if (onRefetchTranscripts) {
+        await onRefetchTranscripts();
+      }
+    } catch (error) {
+      toast.error('Failed to restore transcript', { description: String(error) });
+    } finally {
+      setIsRestoring(false);
+      await refreshBackupCount();
+    }
+  }, [meetingId, meetingFolderPath, isRestoring, onRefetchTranscripts, refreshBackupCount]);
 
   // Run local speaker diarization over the recording and tag segments
   // with Them 1/2/... (or Speaker 1/2/... for imported meetings)
@@ -113,6 +158,23 @@ export function TranscriptButtonGroup({
           >
             <RefreshCw className="xl:mr-2" size={18} />
             <span className="hidden lg:inline">Enhance</span>
+          </Button>
+        )}
+
+        {meetingId && meetingFolderPath && backupCount > 0 && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="xl:px-4"
+            onClick={() => {
+              Analytics.trackButtonClick('undo_enhance_transcript', 'meeting_details');
+              handleUndoEnhance();
+            }}
+            disabled={isRestoring}
+            title="Restore the transcript as it was before the last Enhance"
+          >
+            <Undo2 className={`xl:mr-2 ${isRestoring ? 'animate-pulse' : ''}`} size={18} />
+            <span className="hidden lg:inline">{isRestoring ? 'Restoring...' : 'Undo'}</span>
           </Button>
         )}
 

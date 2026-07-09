@@ -1,5 +1,6 @@
 // Retranscription module - allows re-processing stored audio with different settings
 
+use crate::api::TranscriptSegment;
 use crate::audio::decoder::decode_audio_file;
 use crate::audio::vad::get_speech_chunks_with_progress;
 use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
@@ -428,6 +429,15 @@ async fn run_retranscription<R: Runtime>(
 
     // Wrap delete+insert+update in a transaction to prevent data loss
     let pool = app_state.db_manager.pool();
+
+    // Snapshot the current transcript so the enhance can be undone
+    let previous: Vec<crate::database::models::Transcript> =
+        sqlx::query_as("SELECT * FROM transcripts WHERE meeting_id = ?")
+            .bind(&meeting_id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
     let mut conn = pool.acquire().await.map_err(|e| anyhow!("DB error: {}", e))?;
     let mut tx = sqlx::Connection::begin(&mut *conn)
         .await
@@ -464,6 +474,19 @@ async fn run_retranscription<R: Runtime>(
         segments.len(),
         meeting_id
     );
+
+    // Persist the pre-retranscription snapshot only after the new transcript is
+    // committed, so a backup file always means "there is something to undo"
+    if !previous.is_empty() {
+        match write_transcript_backup(&folder_path, &previous) {
+            Ok(path) => info!(
+                "Backed up {} previous segments to {}",
+                previous.len(),
+                path.display()
+            ),
+            Err(e) => warn!("Failed to back up previous transcript: {}", e),
+        }
+    }
 
     // Write updated transcripts.json and metadata.json to the meeting folder
     emit_progress(&app, &meeting_id, "saving", 90, "Writing transcript files...");
@@ -765,6 +788,59 @@ fn write_retranscription_metadata(
     Ok(())
 }
 
+/// Write the pre-retranscription transcript to transcripts.backup-<timestamp>.json
+/// in the meeting folder, using the same segment shape as transcripts.json.
+fn write_transcript_backup(
+    folder: &Path,
+    transcripts: &[crate::database::models::Transcript],
+) -> Result<PathBuf> {
+    let now = chrono::Utc::now();
+    let path = folder.join(format!(
+        "transcripts.backup-{}.json",
+        now.format("%Y%m%d-%H%M%S")
+    ));
+
+    let json = serde_json::json!({
+        "version": "1.0",
+        "backed_up_at": now.to_rfc3339(),
+        "total_segments": transcripts.len(),
+        "segments": transcripts.iter().map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "text": t.transcript,
+                "timestamp": t.timestamp,
+                "audio_start_time": t.audio_start_time,
+                "audio_end_time": t.audio_end_time,
+                "duration": t.duration,
+                "speaker": t.speaker,
+            })
+        }).collect::<Vec<_>>()
+    });
+
+    std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+    Ok(path)
+}
+
+/// List transcript backup files in a meeting folder, newest first.
+/// The timestamped file names sort chronologically.
+fn find_transcript_backups(folder: &Path) -> Vec<PathBuf> {
+    let mut backups: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("transcripts.backup-") && n.ends_with(".json"))
+                .unwrap_or(false)
+        })
+        .collect();
+    backups.sort();
+    backups.reverse();
+    backups
+}
+
 // Tauri commands
 
 /// Response when retranscription is started
@@ -830,6 +906,103 @@ pub async fn cancel_retranscription_command() -> Result<(), String> {
 #[tauri::command]
 pub async fn is_retranscription_in_progress_command() -> bool {
     is_retranscription_in_progress()
+}
+
+/// Count of transcript backups available for a meeting folder
+#[tauri::command]
+pub async fn list_transcript_backups_command(
+    meeting_folder_path: String,
+) -> Result<usize, String> {
+    Ok(find_transcript_backups(Path::new(&meeting_folder_path)).len())
+}
+
+/// Restore the most recent pre-retranscription transcript backup, replacing the
+/// current transcript in the database and transcripts.json. The consumed backup
+/// file is deleted on success.
+#[tauri::command]
+pub async fn restore_transcript_backup_command<R: Runtime>(
+    app: AppHandle<R>,
+    meeting_id: String,
+    meeting_folder_path: String,
+) -> Result<usize, String> {
+    if is_retranscription_in_progress() {
+        return Err("Cannot restore while a retranscription is in progress".to_string());
+    }
+
+    let folder = PathBuf::from(&meeting_folder_path);
+    let backup_path = find_transcript_backups(&folder)
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No transcript backup found for this meeting".to_string())?;
+
+    let raw = std::fs::read_to_string(&backup_path)
+        .map_err(|e| format!("Failed to read backup: {}", e))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("Backup file is corrupt: {}", e))?;
+    let segments: Vec<TranscriptSegment> = parsed
+        .get("segments")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| format!("Backup file is corrupt: {}", e))?
+        .unwrap_or_default();
+
+    if segments.is_empty() {
+        return Err("Backup contains no transcript segments".to_string());
+    }
+
+    let app_state = app
+        .try_state::<AppState>()
+        .ok_or_else(|| "App state not available".to_string())?;
+    let pool = app_state.db_manager.pool();
+    let mut conn = pool.acquire().await.map_err(|e| format!("DB error: {}", e))?;
+    let mut tx = sqlx::Connection::begin(&mut *conn)
+        .await
+        .map_err(|e| format!("Failed to start transaction: {}", e))?;
+
+    sqlx::query("DELETE FROM transcripts WHERE meeting_id = ?")
+        .bind(&meeting_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to delete current transcripts: {}", e))?;
+
+    for segment in &segments {
+        sqlx::query(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, audio_start_time, audio_end_time, duration, speaker)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&segment.id)
+        .bind(&meeting_id)
+        .bind(&segment.text)
+        .bind(&segment.timestamp)
+        .bind(segment.audio_start_time)
+        .bind(segment.audio_end_time)
+        .bind(segment.duration)
+        .bind(&segment.speaker)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to insert transcript: {}", e))?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit transaction: {}", e))?;
+
+    if let Err(e) = write_transcripts_json(&folder, &segments) {
+        warn!("Restored DB but failed to rewrite transcripts.json: {}", e);
+    }
+
+    if let Err(e) = std::fs::remove_file(&backup_path) {
+        warn!("Failed to remove consumed backup {}: {}", backup_path.display(), e);
+    }
+
+    info!(
+        "Restored {} transcript segments for meeting {} from {}",
+        segments.len(),
+        meeting_id,
+        backup_path.display()
+    );
+    Ok(segments.len())
 }
 
 #[cfg(test)]

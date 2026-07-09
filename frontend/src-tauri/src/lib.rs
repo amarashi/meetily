@@ -823,6 +823,8 @@ pub fn run() {
             audio::retranscription::start_retranscription_command,
             audio::retranscription::cancel_retranscription_command,
             audio::retranscription::is_retranscription_in_progress_command,
+            audio::retranscription::list_transcript_backups_command,
+            audio::retranscription::restore_transcript_backup_command,
             // Speaker diarization command
             audio::diarization::diarize_meeting,
             // Import audio commands
